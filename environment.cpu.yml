@@ -1,0 +1,14 @@
+name: mvsc-py39-cpu
+channels:
+  - pytorch
+  - defaults
+dependencies:
+  - python=3.9
+  - pytorch=1.12.1
+  - torchvision=0.13.1
+  - cpuonly
+  - numpy
+  - pillow
+  - pip
+  - pip:
+      - timm>=0.6.13,<1.0

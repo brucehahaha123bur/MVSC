@@ -1,0 +1,31 @@
+from torch.utils.data import DataLoader
+from data.harmony4d_mvsc import Harmony4DMVSCDataset
+
+root = "/Volumes/ResearchSSD/data/01_hugging/001_hugging/exo"
+
+dataset = Harmony4DMVSCDataset(
+    root=root,
+    num_views=4,
+    num_frames=4,
+    crop_size=256,
+    resize_shorter_to=None,   # 原图大，直接随机裁 256
+    random_crop=True,
+    random_flip=True,
+    min_common_frames=8,
+    repeat=2000,              # 单个 scene 可重复采样
+)
+
+loader = DataLoader(
+    dataset,
+    batch_size=2,
+    shuffle=True,
+    num_workers=0,
+    pin_memory=True,
+)
+
+for batch in loader:
+    x = batch["x"]   # [B,T,V,3,256,256]
+    print("x.shape =", x.shape)
+    print("cams =", batch["cam_names"])
+    print("frames =", batch["frame_names"])
+    break

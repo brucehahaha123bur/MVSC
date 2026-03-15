@@ -1,0 +1,588 @@
+
+
+===== PAGE 1 =====
+Multi-View Video Semantic Communication
+Yuanhang Ren, Lei Teng, Zhicheng Bao, Senran Fan, Chen Dong*, Xiaodong Xu, Lin Li, Zelong Li
+Abstract—In the 6G era, the demand for higher-quality wire-
+less video transmission with lower communication resources is
+increasing. For example, multi-view video transmission faces
+significant technical challenges due to high bandwidth con-
+sumption and complex channel environments. To address these
+issues, this paper proposes an innovative Multi-View Video
+Semantic Communication (MVSC) framework. By employing
+a hierarchical semantic encoding mechanism, MVSC leverages
+the commonality among multi-view videos and integrates joint
+source-channel coding techniques to achieve efficient data
+compression and robust transmission. Specifically, the system
+utilizes individual encoders to extract single-frame features and
+a spatio-temporal commonality encoder to fuse shared spatio-
+temporal features across multiple views, substantially reduc-
+ing information redundancy. Experimental results demonstrate
+that, under A WGN channels, MVSC outperforms conventional
+video communication methods in terms of PSNR and MS-SSIM
+metrics, particularly in bandwidth-constrained and low SNR
+scenarios. This study provides an efficient and robust solution
+for multi-view video transmission.
+Index Terms—Semantic communication, Multi-view video
+transmission, Swin Transformer, Joint source-channel coding.
+I. I NTRODUCTION
+In the 6G era, the demand for higher wireless video
+transmission quality with lower communication resources
+has increased, particularly in scenarios requiring high data
+rates and transmission quality, such as multi-view sports
+broadcasting, virtual reality, or panoramic video. In tradi-
+tional communication systems, the physical layer transmis-
+sion capacity is struggling to keep up with the growing
+data volume demands, thus facing significant challenges in
+achieving further performance improvements. Meanwhile,
+lossless communication architectures based on entropy-based
+source coding and channel coding are prone to the cliff effect
+under adverse channel conditions, where the receiver fails to
+effectively recover signals from noise when channel quality
+deteriorates beyond a certain threshold. These challenges
+underscore the urgent need for an emerging communication
+Yuanhang Ren, Lei Teng, Zhicheng Bao, Senran Fan, Xiaodong
+Xu are with the State Key Laboratory of Networking and Switch-
+ing Technology, Beijing University of Posts and Telecommunications,
+Beijing, 100876, China. (E-mail: ryh@bupt.edu.cn; tenglei@bupt.edu.cn;
+zhicheng bao@bupt.edu.cn; FSR@bupt.edu.cn; xuxiaodong@bupt.edu.cn;)
+*Chen Dong is the corresponding author and with the State Key
+Laboratory of Networking and Switching Technology, Beijing Univer-
+sity of Posts and Telecommunications, Beijing, 100876, China. (E-mail:
+dongchen@bupt.edu.cn)
+Lin Li is with the MIGU Co.,Ltd, BeiJing, China, and also with the Migu
+Meland Co.,Ltd (e-mail: lilin@migu.cn).
+Zelong Li is with the University of Amsterdam, Amsterdam, Netherlands
+(e-mail: loong.li2@student.uva.nl)
+This work is supported by the National Key R&D Program of China under
+Grant 2022YFB2902100. This work is supported by the Project Research
+on Video Semantic Transmission Technology Based on Source Channel
+Joint Coding, MIGU BUPT Joint Laboratory for Next-Generation Network
+Video Transmission and Digital Space Interoperability (Project Number:
+R24115SE).
+technology that combines high robustness and efficiency
+within limited bandwidth.
+For multi-view video transmission, current technologies
+lack efficient collaborative compression and transmission
+mechanisms, failing to exploit the inherent correlations
+among multi-view video information [1]. This results in low
+compression efficiency and large bandwidth consumption.
+Consequently, there is an urgent need to develop more
+advanced multi-view video transmission systems to optimize
+the utilization of commonalities among multi-view video
+data, reduce bandwidth usage, and enhance transmission
+efficiency [2].
+Semantic communication represents an effective approach
+to addressing this issue. Unlike traditional error-free bit
+transmission, semantic communication does not treat all
+information bits equally. Instead, it achieves efficient com-
+munication by extracting, transmitting, and reconstructing
+the semantics of the source data. To further enhance the
+noise resilience of semantic communication, works in lit-
+erature [3] proposed joint source-channel coding (JSCC),
+which integrates source and channel processing. Works in
+literature [4] and [5] applied JSCC to the visual domain,
+where source data is directly encoded into continuous-valued
+symbols using convolutional neural networks (CNN). By
+incorporating channel simulation models to introduce noise
+during training, these methods overcome the cliff effect and
+improve communication system performance.
+With the advancement of semantic communication, in-
+creasing research has emerged across various source types,
+including text, speech , images [6] [7], videos [8]–[10],
+VR [11], and 3D point clouds [12]. Within the domain of
+video semantic communication, works in [13] developed a
+deep joint source-channel coding method based on traditional
+motion estimation and motion compensation frameworks,
+enabling end-to-end video transmission over wireless chan-
+nels. Works in [14] proposed a novel approach for efficient
+and controllable video data transmission over noisy wireless
+channels, introducing a model partitioning strategy to extract
+shared semantic features between video frames, combined
+with a semantic importance coding mechanism, to enhance
+noise resilience while maintaining reconstruction quality.
+Works in [15] designed an image semantic communication
+system based on the Swin Transformer, which exhibits sig-
+nificant advantages in image reconstruction quality compared
+to traditional CNN architectures.
+However, current research on semantic communication has
+not yet addressed multi-view video scenarios. To meet the
+demand for efficiency and robustness in multi-view video
+transmission under 6G scenarios, this paper proposes a multi-
+view video semantic communication framework based on the
+3D Swin Transformer. By exploiting semantic correlations
+between views and video frames, the framework optimizes
+2025 IEEE/CIC International Conference on Communications in China (ICCC Workshops)
+978-1-6654-7801-4/25/$31.00 ©2025 IEEE
+2025 IEEE/CIC International Conference on Communications in China (ICCC Workshops) | 978-1-6654-7801-4/25/$31.00 ©2025 IEEE | DOI: 10.1109/ICCCWorkshops67136.2025.11148118
+Authorized licensed use limited to: BEIJING UNIVERSITY OF POST AND TELECOM. Downloaded on October 30,2025 at 06:19:50 UTC from IEEE Xplore.  Restrictions apply. 
+
+===== PAGE 2 =====
+Fig. 1. The MVSC framework for multi-view video transmission. Individual Encoders extract semantic features from each video frame, Spatiotemporal
+Commonality Encoder fuses these features across views and time. This hierarchical approach efficiently captures spatial, temporal, and inter-view correlations
+for improved transmission quality.
+compression efficiency and transmission stability, providing
+an effective solution for multi-view video transmission.
+The main contributions of this paper are as follows:
+(1) MVSC framework based on the 3D Swin Transformer
+is proposed. Integrating multi-view video transmission with
+semantic communication. By performing unified semantic
+information extraction, transmission, and reconstruction for
+multi-view videos, the framework fully exploits the correla-
+tions among multi-view videos, reducing information redun-
+dancy and enhancing transmission efficiency. Additionally,
+joint source-channel coding techniques are incorporated to
+improve the system’s noise resilience, demonstrating robust
+performance under low Signal-to-Noise Ratio (SNR) and
+bandwidth-constrained conditions, making it suitable for 6G
+network communication scenarios.
+(2) A hierarchical semantic codec model based on win-
+dowed self-attention is designed. This model achieves lay-
+ered semantic feature extraction, fusion, and reconstruction
+through individual codecs and a spatio-temporal commonal-
+ity codec. The individual codec employs a 2D Swin Trans-
+former to perform semantic compression on each frame,
+generating compact feature representations and enabling
+frame-level reconstruction. The spatio-temporal commonality
+codec, utilizing a 3D Swin Transformer, captures shared se-
+mantic features across frames in the spatio-temporal domain,
+enabling multi-frame feature fusion, further compression,
+and cross-frame reconstruction. By adopting a hierarchical
+strategy of local compression followed by global processing,
+the model effectively understands and extracts semantic
+features of multi-view videos in both temporal and spatial
+dimensions, while leveraging the codec architecture to en-
+hance compression efficiency and reconstruction quality.
+(3) Experiments evaluate the performance of MVSC under
+varying SNR and channel bandwidth ratio (CBR) conditions,
+demonstrating significant advantages over traditional multi-
+view video communication methods in terms of peak signal-
+to-noise ratio (PSNR) and multi-scale structural similarity
+(MS-SSIM) metrics.
+The remainder of the paper is organized as follows.
+Section II introduces the overall system model and the
+proposed methodology. Section III elaborates on the network
+architecture and corresponding algorithms. The experimental
+results are presented in Section IV , and Section V concludes
+the paper.
+II. S YSTEM ARCHITECTURE
+This section elaborates on the framework and theoretical
+model of the multi-view video semantic communication
+system. The MVSC framework, leveraging the hierarchical
+window-based self-attention mechanism of the 3D Swin
+Transformer, adopts a JSCC approach to optimize bandwidth
+utilization and reconstruction quality. The system comprises
+individual encoders, a spatio-temporal commonality encoder,
+a JSCC encoder, a channel model, a JSCC decoder, a spatio-
+temporal commonality decoder, and individual decoders.
+Through a staged semantic encoding mechanism, it enables
+cross-view semantic feature processing to meet the demands
+of high-quality multi-view video transmission. Fig. 1 illus-
+trates the overall system framework.
+Consider a multi-view video source X, where each element
+xvt ∈ RH×W ×C represents the frame of the v-th view at the
+t-th time step, with v = 1, 2, . . . , V denoting the number of
+views and t = 1, 2, . . . , T denoting the number of time steps.
+Here, H, W and C represent the height, width, and number
+of channels of the multi-view video frames, respectively. The
+source information can be expressed in matrix form as:
+X =
+
+
+
+x11 x12 · · · x1T
+x21 x22 · · · x2T
+...
+xV 1
+...
+xV 2
+...
+. . .
+...
+xV T
+
+
+
+, (1)
+2025 IEEE/CIC International Conference on Communications in China (ICCC Workshops)
+Authorized licensed use limited to: BEIJING UNIVERSITY OF POST AND TELECOM. Downloaded on October 30,2025 at 06:19:50 UTC from IEEE Xplore.  Restrictions apply. 
+
+===== PAGE 3 =====
+where each row of X represents the frame set of a single
+view across different time steps, and each column represents
+the frame set of V views at the same time step t.
+For efficient processing, the source sequence is divided
+into Groups of Pictures (GOP), denoted as Xg. Each GOP
+contains Vg views, with each view comprising Tg consecutive
+and synchronized frames, resulting in a total of Vg·Tg frames.
+The input shape of Xg is [B, C, Vg, Tg, H, W ], where B
+represents the batch size.
+The proposed MVSC system takes the GOP Xg as input
+and converts it into a compact semantic feature represen-
+tation Sg through an encoder based on Swin Transformer,
+which is divided into a personality encoder and a spatio-
+temporal commonality encoder. Specifically, the personality
+encoder adopts a traditional 2D Swin Transformer for image
+processing to perform semantic compression on the video
+frame xv,t in each GOP, where v = 1, 2, . . . , Vg is the view
+index in the GOP, and t = 1, 2, . . . , Tg is the frame index
+of a single view in the GOP. The personality features Lg
+generated by the personality encoder are expressed as:
+Lg =
+
+L1,1, L1,2, . . . , LVg,Tg
+	
+, (2)
+where Lv,t ∈ RH ′×W ′×C′
+, H ′ = H/2l, W ′ = W/2l, and
+l is the number of encoder layers. The personality features
+gradually reduce the spatial resolution through block em-
+bedding and 2D window self-attention mechanism to extract
+high-level semantic information. Subsequently, the spatio-
+temporal commonality encoder uses 3D Swin Transformer
+to process the spliced personality features Lg to generate
+global features Sg. The 3D Swin Transformer extends the
+traditional 2D Swin Transformer for image processing to
+three-dimensional space by introducing the processing of
+time and view dimensions. The difference is that the 2D
+version only applies window self-attention on a single frame
+image, while the 3D version applies three-dimensional win-
+dow self-attention among multiple frames, thereby capturing
+inter-frame correlation and multi-view correlation.
+The encoded Sg is transmitted through a wireless channel
+with the transfer function W(·; P), where P denotes the
+channel parameters. The received symbols ˆSg are expressed
+as:
+ˆSg = W(Sg; P), (3)
+ˆSg contains noise interference. The receiver reconstructs
+ˆSg into ˆXg through a personality decoder and a spatio-
+temporal commonality decoder. The goal is to minimize the
+reconstruction distortion Dn while optimizing the bandwidth
+efficiency, which can be expressed as:
+Dn = MSE(Xg, ˆXg). (4)
+The system employs JSCC, optimizing the encoder and de-
+coder through end-to-end training to adapt to different SNR
+and bandwidth constraints, achieving robust reconstruction
+under low SNR and bandwidth-limited conditions.
+III. M ODEL DESIGN
+This section elaborates on the proposed MVSC frame-
+work, which leverages Swin Transformer and a hierarchical
+semantic coding mechanism to enable efficient multi-view
+video transmission. The MVSC framework optimizes multi-
+view video communication performance in 6G networks
+through hierarchical semantic feature extraction and JSCC.
+The overall process of the MVSC framework is shown
+in Fig. 2(a). The input is the GOP Xg with the shape of
+[H, W, 3, T, V ], where T represents the number of single-
+view frames in a GOP and V denotes the number of views
+in the GOP. Fig. 2(b) illustrates the detailed architecture
+of 2D and 3D Swin Transformer Block, and Fig. 2(c)-(d)
+present the self-attention mechanism architectures of 2D and
+3D Swin Transformer Block.
+A. Transmitter
+1) Individual Encoder: It performs semantic compression
+on each view frame xn,v to generate individual features
+Ln,v. Based on 2D Swin Transformer, this encoder ex-
+tracts semantic features of each frame through window
+self-attention mechanism. An Individual Semantic Encoder
+consists of 3 layers of Patch Processing modules and 2D
+Swin Transformer Blocks. The first layer’s Patch Processing
+is a Patch Embedding module, which splits the input image
+into non-overlapping patches and projects them into a higher-
+dimensional feature space, while the remaining two layers
+employ Patch Merging modules, which reduce the spatial res-
+olution of features and aggregate local information through
+concatenation and linear projection. Each layer changes the
+frame size, reducing H and W to 1/2 of the original,
+with the output shape of [H/2, W/2, C1, T, V ]. For one
+GOP, after three-layer processing, the Individual Semantic
+Encoder generates individual features Lg with the shape of
+[H/8, W/8, C′, T, V ].
+2) Spatio-Temporal Commonality Encoder: This module
+processes the concatenated individual features Lg using
+3D Swin Transformer. It captures temporal and inter-view
+correlations through a 3D window self-attention mechanism,
+generating spatio-temporal commonality features Sg. The
+Spatio-Temporal Commonality Encoder consists of three lay-
+ers of Patch Processing modules and 3D Swin Transformer
+Blocks. The Patch Processing modules also consists of one
+Patch Embedding module and two Patch Merging modules.
+But unlike the Individual Semantic Encoder, each layer
+modifies the number of video frames T . After three layers
+of processing, the Spatio-Temporal Commonality Encoder
+produces spatio-temporal commonality features Sg with the
+shape [H/8, W/8, C′′, T ′, V ].
+3) JSCC Encoder: The JSCC encoder in this paper con-
+sists of three consecutive blocks. Each block includes a
+downsampling convolutional layer for video compression
+and three residual layers. These components are designed
+to encode the spatio-temporal commonality features from
+the Spatio-Temporal Commonality Encoder and adapt to
+channel conditions. It transforms semantic information into
+codewords robust against channel noise and transmits them
+through the channel.
+2025 IEEE/CIC International Conference on Communications in China (ICCC Workshops)
+Authorized licensed use limited to: BEIJING UNIVERSITY OF POST AND TELECOM. Downloaded on October 30,2025 at 06:19:50 UTC from IEEE Xplore.  Restrictions apply. 
+
+===== PAGE 4 =====
+Fig. 2. Network architectures of MVSC. (a) shows the overall architecture of MVSC, (b) illustrates the detailed architecture of 2D/3D Swin Transformer
+Block, and (c)-(d) present the self-attention mechanism architectures of 2D and 3D Swin Transformer Block, respectively. Both the Individual Semantic
+Encoder and Spatio-Temporal Commonality Encoder are composed of three stacked Patch Processing + Swin Transformer Blocks. The distinction lies
+in that the Swin Transformer Block in the Individual Semantic Encoder is 2D, designed to capture the individual semantic information of single-frame
+images, while the Spatio-Temporal Commonality Encoder employs 3D Swin Transformer Block to further fuse the spatio-temporal semantic information
+of the spliced multi-view video frame groups after single-frame semantic extraction.
+B. Channel
+The wireless channel module is a non-trainable layer
+connecting the transmitter and receiver. This paper mainly
+uses the Additive White Gaussian Noise (AWGN) channel.
+The influence of the wireless channel is determined by SNR.
+C. Receiver
+1) JSCC Decoder: The JSCC decoder in this paper has
+a structure similar to the JSCC encoder, consisting of three
+blocks, each with a transposed convolutional layer and three
+residual layers.
+2) Spatio-Temporal Commonality Decoder: This module
+is symmetrical to the Spatio-Temporal Commonality En-
+coder, transforming the channel-transmitted spatio-temporal
+commonality features ˆSg into individual features ˆLg.
+3) Individual Decoder: Symmetrical to the Individual
+Encoder, it reconstructs ˆLg into multi-view video frames ˆXg,
+which are sent to the output of the MVSC system.
+IV. EXPERIMENTAL RESULTS
+A. Experimental Setup
+1) Datasets: The MVSC is trained on Harmony 4D
+dataset [16] and a commercial dataset, which contains
+137,000 multi-view synchronized video clips with diverse
+scenes and actions, featuring 20 views. The datasets include
+processed data with resolutions of 1920×1080(Dataset A)
+and 3840×2160(Dataset B). During training, all of the 20
+views are used, the GOP size is set to 4×4=16, meaning
+each GOP includes 4 consecutive frames from 4 views,
+randomly cropped to 256×256 pixels. After training, the
+performance is evaluated using Harmony 4D test set and
+commercial test set with resolutions of 1920×1080(TestData
+A) and 3840×2160(TestData B).
+2) Implementation Details: In all experiments, the chan-
+nel dimension of JSCC codewords is 128. The MVSC is
+trained based on the Mean Squared Error (MSE), and the
+performance is tested using PSNR and MS-SSIM [17], which
+are perceptual quality metrics. The calculation formulas are
+as follows:
+MSE(X, Y ) = 1
+mn
+m−1X
+i=0
+n−1X
+j=0
+[X(i, j) − Y (i, j)]2, (5)
+PSNR(X, Y ) = 10 · log10
+ 1
+MSE
+
+, (6)
+2025 IEEE/CIC International Conference on Communications in China (ICCC Workshops)
+Authorized licensed use limited to: BEIJING UNIVERSITY OF POST AND TELECOM. Downloaded on October 30,2025 at 06:19:50 UTC from IEEE Xplore.  Restrictions apply. 
+
+===== PAGE 5 =====
+Fig. 3. Relationships between PSNR/MS-SSIM performance and CBR for different coding-decoding schemes under SNR=15 dB. MVSC achieves higher
+reconstruction quality than traditional coding-decoding schemes at the same CBR. When maintaining equivalent reconstruction quality, MVSC requires
+lower CBR, demonstrating MVSC enhances compression efficiency for multi-view video.
+Fig. 4. PSNR and MS-SSIM performance versus the change of channel SNR
+over AWGN channel. MVSC demonstrates outstanding noise immunity and
+sustains reliable transmission quality in low-SNR scenarios, representing a
+marked improvement over conventional coding schemes.
+MS − SSIM(X, Y ) =
+[LM (X, Y )]αM ·
+MY
+j=1
+[Cj(X, Y ) · Sj(X,Y )]αj, (7)
+M represents different dimensions, including luminance
+LM (·), contrast Cj (·), and structure Sj (·). PSNR focuses
+more on frame reconstruction accuracy, while MS-SSIM is
+closer to human perceptual quality.
+To measure the cost of communication resources, Works
+in [18] proposed CBR, which is used here to measure the
+communication cost of transmitting the GOP Xg. CBR is
+defined as:
+Kn = 1
+N + 1
+N +1X
+n=1
+kn
+m , (8)
+where m is the data volume of the uncompressed original
+source. For an RGB image source, m can be calculated by
+m = 3 × H × W , where H and W are the resolution of the
+RGB image. Typically, CBR can be regarded as the channel
+bandwidth cost for transmitting each piece of data through
+the wireless channel. The higher the CBR, the more channel
+bandwidth is used to transmit the same data. Therefore, for
+the same communication performance, a lower CBR leads
+to higher communication efficiency.
+The hyperparameter λ is fixed at 8192 during training,
+the initial learning rate is set to 10−4, which decreases
+using the cosine annealing algorithm, and the batch size is
+16. The training is conducted on an RTX 3090 ti GPU. It
+should be noted that since the research focuses on digital
+communication systems, semantic data transmission needs
+to be quantized into bits. In this paper, 3-bit quantization is
+applied to the encoding results of the semantic model.
+3) Comparison Schemes: MVSC is compared with tra-
+ditional video coding and transmission schemes, including
+source coding H.264 and H.265, and channel coding LDPC.
+In this paper, 1/2 LDPC code means half of the total code
+length is used. Modulation schemes BPSK and 16QAM are
+adopted for noise resistance and transmission efficiency.
+B. Result Analysis
+1) Performance under Different CBRs: Fig. 3 shows the
+PSNR and MS-SSIM curves of various CBRs on two differ-
+ent datasets. The experiment was conducted at SNR=15dB.
+Since H.264/H.265 + 16QAM + 1/4 LDPC cannot operate at
+low SNR levels, SNR=15dB was selected as the experimental
+condition.
+For the PSNR metric, MVSC outperforms the combination
+of H.264/H.265 with BPSK + 1/2 LDPC and H.264 +
+16QAM + 1/4 LDPC at both resolutions. MVSC is only
+surpassed by H.265 + 16QAM + 1/4 LDPC when the CBR
+is high and the transmission bandwidth is sufficient at the
+1920×1080 resolution.
+For the MS-SSIM metric consistent with human perceptual
+quality, MVSC significantly exceeds H.264/H.265 combined
+with BPSK + 1/2 LDPC and the transmission efficiency com-
+bination of H.264 with 16QAM + 1/4 LDPC. Additionally,
+similar to PSNR, MVSC is only outperformed by H.265 +
+16QAM + 1/4 LDPC at one resolution with a high CBR.
+Experimental results show that MVSC significantly im-
+proves reconstruction quality at identical bitrates compared
+to conventional schemes, while achieving comparable visual
+quality with substantially reduced bitrate requirements. This
+conclusively validates its breakthrough in multi-view video
+compression efficiency.
+2) Performance under Different SNRs: Fig. 4 illustrates
+the PSNR and MS-SSIM curves on one dataset under varying
+SNRs with a controlled CBR of 0.015. It can be observed
+that MVSC performs well even in extremely harsh channel
+conditions, with its performance gradually increasing as the
+SNR rises. In contrast, traditional schemes exhibit a signifi-
+cant cliff effect, failing to function properly when the SNR
+is below a certain threshold. The bit errors uncorrected by
+LDPC coding make it difficult for traditional video decoders
+to correctly recover video frames, especially when these
+errors occur in control bits.
+2025 IEEE/CIC International Conference on Communications in China (ICCC Workshops)
+Authorized licensed use limited to: BEIJING UNIVERSITY OF POST AND TELECOM. Downloaded on October 30,2025 at 06:19:50 UTC from IEEE Xplore.  Restrictions apply. 
+
+===== PAGE 6 =====
+Fig. 5. CBR and PSNR curves of MVSCs trained with different numbers
+of views. ”MVSC with 4 views” indicates that the MVSC only uses 4 out of
+the total 20 views during training, and the 4-view architecture is employed
+to reconstruct the video frames of these 4 views.
+The experiment demonstrates that MVSC exhibits out-
+standing noise resistance capabilities and maintains robust
+transmission performance even under low SNR conditions.
+3) Extended Experiment: To quantify the impact of the
+number of views on MVSC performance, measure the com-
+pression efficiency of multi-view videos, and reveal the
+importance of multi-view research content, an extended
+experiment for different numbers of views is proposed. Fig.
+5 shows the CBR and PSNR curves of MVSC trained with
+different numbers of views by masking varying view counts
+and controlling the number of views during training. ”MVSC
+with 4 views” indicates that the MVSC only uses 4 out of the
+total 20 views during training, and the 4-view architecture is
+employed to reconstruct the video frames of these 4 views.
+It can be observed that as the number of views increases, the
+video reconstruction effect improves significantly. When all
+20 views are used, the PSNR is much higher than that when
+only 4 views are employed. Additionally, when the number
+of views is small, increasing the number of views leads to a
+remarkable improvement in PSNR.
+The experiments validate the critical role of inter-view
+common information in multi-view video transmission,
+demonstrating that increasing the number of views enables
+the integration of more spatiotemporal common features,
+thereby achieving superior video reconstruction quality. Fur-
+thermore, the results confirm the high efficiency of MVSC’s
+architecture in leveraging inter-view correlations, presenting
+a groundbreaking solution for multi-view video transmission.
+V. C ONCLUSION
+This paper proposes MVSC that fully leverages the cor-
+relation among multi-view videos to reduce information
+redundancy and improve transmission efficiency. By in-
+troducing JSCC technology, the system’s noise resistance
+is enhanced. Additionally, a hierarchical semantic coding
+model is designed, which realizes layered semantic feature
+extraction and fusion through an individual encoder and
+a spatio-temporal commonality encoder. The hierarchical
+strategy of local compression followed by global processing
+enhances the compression efficiency and reconstruction qual-
+ity of multi-view videos. Compared with traditional methods,
+MVSC demonstrates remarkable performance in multi-view
+video coding-decoding, reconstruction, and noise resistance.
+REFERENCES
+[1] D. Yun and K. Chung, “DASH-Based Multi-View Video Streaming
+System,” IEEE Transactions on Circuits and Systems for Video Tech-
+nology, vol. 28, no. 8, pp. 1974–1980, 2018.
+[2] C. Lin, Y . Zhao, J. Xiao, and T. Tillo, “Region-Based Multiple
+Description Coding for Multiview Video Plus Depth Video,” IEEE
+Transactions on Multimedia, vol. 20, no. 5, pp. 1209–1223, 2018.
+[3] M. Fresia, F. Per ´ez-Cruz, H. V . Poor, and S. Verd´u, “Joint Source and
+Channel Coding,” IEEE Signal Processing Magazine, vol. 27, no. 6,
+pp. 104–113, 2010.
+[4] H. Xie, Z. Qin, G. Y . Li, and B.-H. Juang, “Deep Learning Enabled
+Semantic Communication Systems,” IEEE Transactions on Signal
+Processing, vol. 69, pp. 2663–2675, 2021.
+[5] C. Dong, H. Liang, X. Xu, S. Han, B. Wang, and P. Zhang, “Semantic
+Communication System Based on Semantic Slice Models Propaga-
+tion,” IEEE Journal on Selected Areas in Communications, vol. 41,
+no. 1, pp. 202–213, 2023.
+[6] S. Fan, H. Liang, C. Dong, X. Xu, and G. Liu, “A Specific Task-
+Oriented Semantic Image Communication System for Substation Pa-
+trol Inspection,” IEEE Transactions on Power Delivery, vol. 39, no. 2,
+pp. 835–844, 2024.
+[7] J. Dai, S. Wang, K. Tan, Z. Si, X. Qin, K. Niu, and P. Zhang,
+“Nonlinear Transform Source-Channel Coding for Semantic Com-
+munications,” IEEE Journal on Selected Areas in Communications,
+vol. 40, no. 8, pp. 2300–2316, 2022.
+[8] W. Yang, Z. Xiong, Y . Yuan, W. Jiang, T. Q. S. Quek, and M. Deb-
+bah, “Agent-Driven Generative Semantic Communication With Cross-
+Modality and Prediction,” IEEE Transactions on Wireless Communi-
+cations, vol. 24, no. 3, pp. 2233–2248, 2025.
+[9] P. Samarathunga, Y . Ganearachchi, T. Fernando, A. Jayasingam,
+I. Alahapperuma, and A. Fernando, “A Semantic Communication and
+VVC Based Hybrid Video Coding System,” IEEE Access, vol. 12, pp.
+79 202–79 224, 2024.
+[10] J. Dai, S. Wang, K. Yang, K. Tan, X. Qin, Z. Si, K. Niu, and
+P. Zhang, “Toward Adaptive Semantic Communications: Efficient
+Data Transmission via Online Learned Nonlinear Transform Source-
+Channel Coding,”IEEE Journal on Selected Areas in Communications,
+vol. 41, no. 8, pp. 2609–2627, 2023.
+[11] H. Zhang, Z. Bao, H. Liang, Y . Liu, C. Dong, and L. Li, “Diffusion-
+Based Wireless Semantic Communication for VR Image,” in 2024
+IEEE/CIC International Conference on Communications in China
+(ICCC Workshops), 2024, pp. 639–644.
+[12] X. Liu, H. Liang, Z. Bao, C. Dong, and X. Xu, “A Semantic Com-
+munication System for Point Cloud,” IEEE Transactions on V ehicular
+Technology, vol. 74, no. 1, pp. 894–910, 2025.
+[13] S. Wang, J. Dai, Z. Liang, K. Niu, Z. Si, C. Dong, X. Qin, and
+P. Zhang, “Wireless Deep Video Semantic Transmission,” IEEE Jour-
+nal on Selected Areas in Communications, vol. 41, no. 1, pp. 214–229,
+2023.
+[14] Z. Bao, H. Liang, C. Dong, C. Li, X. Xu, and P. Zhang, “MD-
+VSC—Efficient Wireless Model Division Video Semantic Commu-
+nication,” IEEE Internet of Things Journal, 2024.
+[15] K. Yang, S. Wang, J. Dai, X. Qin, K. Niu, and P. Zhang, “SwinJSCC:
+Taming Swin Transformer for Deep Joint Source-Channel Coding,”
+IEEE Transactions on Cognitive Communications and Networking,
+vol. 11, no. 1, pp. 90–104, 2025.
+[16] R. Khirodkar, J.-T. Song, J. Cao, Z. Luo, and K. Kitani, “Harmony4D:
+A Video Dataset for In-The-Wild Close Human Interactions,” 2024.
+[17] Z. Wang, E. Simoncelli, and A. Bovik, “Multiscale structural simi-
+larity for image quality assessment,” in The Thrity-Seventh Asilomar
+Conference on Signals, Systems Computers, 2003, vol. 2, 2003, pp.
+1398–1402 V ol.2.
+[18] D. B. Kurka and D. G ¨und¨uz, “DeepJSCC-f: Deep Joint Source-
+Channel Coding of Images With Feedback,” IEEE Journal on Selected
+Areas in Information Theory, vol. 1, no. 1, pp. 178–193, 2020.
+2025 IEEE/CIC International Conference on Communications in China (ICCC Workshops)
+Authorized licensed use limited to: BEIJING UNIVERSITY OF POST AND TELECOM. Downloaded on October 30,2025 at 06:19:50 UTC from IEEE Xplore.  Restrictions apply. 
