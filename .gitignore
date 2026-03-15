@@ -1,0 +1,21 @@
+# Python cache and bytecode
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+
+# Training outputs and checkpoints
+runs/
+*.pt
+*.pth
+*.ckpt
+
+# Notebook and editor artifacts
+.ipynb_checkpoints/
+.vscode/
+
+# OS metadata
+.DS_Store
+._*
