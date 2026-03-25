@@ -1,7 +1,7 @@
 from net.modules import *
 import math
 import torch
-from net.encoder import (
+from net.encoder2 import (
     SwinTransformerBlock,
     SwinTransformerBlock3D,
     AdaptiveModulator,
@@ -232,13 +232,16 @@ class BasicLayer3D_Dec(nn.Module):
     Input: [B, D, L, C]
     Output: [B, D, L, C]
     where D is the flattened depth axis formed from temporal and view dimensions.
+    The 3D shifted-window setting follows the paper-style configuration: if
+    `window_size=4`, the effective 3D window is `(4, 4, 4)`, and the shifted
+    block uses `(2, 2, 2)`.
     """
     def __init__(self, dim, input_resolution, depth, num_heads, window_size=8):
         super().__init__()
         if isinstance(window_size, int):
-            window_size_3d = (2, window_size, window_size)
+            window_size_3d = (window_size, window_size, window_size)
         elif len(window_size) == 2:
-            window_size_3d = (2, window_size[0], window_size[1])
+            window_size_3d = (window_size[0], window_size[0], window_size[1])
         else:
             window_size_3d = tuple(window_size)
 
@@ -380,23 +383,28 @@ class MVSC_JSCC_Decoder(nn.Module):
       [B, D, L, latent_dim]
 
     Output:
-      [B, Tc, Vc, L_out, embed_dim]
+      [B, Tc, Vc, L_out, 320]
 
-    In the current configuration, the JSCC decoder is set to a fully
-    non-compressive mode: it preserves the input depth axis and spatial token
-    resolution, and only maps latent features back to semantic features.
+    Decoder setting:
+      - keep the depth axis D unchanged
+      - keep the spatial token grid unchanged
+      - only refine semantic features and restore explicit temporal/view layout
+
+    No-upsample version:
+      - if input L = 1024 (32x32), output L_out is also 1024
 
     Here D is the flattened depth axis produced by the JSCC encoder, and the
     decoder restores the explicit temporal/view layout using the compressed view
     count Vc after the feature transformation path.
     """
-    def __init__(self, latent_dim=256, embed_dim=256, compressed_num_views=2, temporal_upsample_in_jscc=False):
+    def __init__(self, latent_dim=256, embed_dim=320, compressed_num_views=4, temporal_upsample_in_jscc=False):
         super().__init__()
         self.compressed_num_views = compressed_num_views
         self.temporal_upsample_in_jscc = temporal_upsample_in_jscc
-        # Fully non-compressive JSCC decoder:
-        # keep depth D and spatial resolution H/W unchanged in all three blocks,
-        # and only perform feature transformation.
+        # JSCC decoder (no spatial upsampling):
+        # keep depth D unchanged
+        # keep H/W unchanged
+        # only do feature refinement + channel projection
         self.blocks = nn.ModuleList(
             [
                 JSCCUpBlock(latent_dim, embed_dim, stride=1, num_res_blocks=3),
@@ -442,48 +450,88 @@ class MVSC_Commonality_Decoder(nn.Module):
     Input:  [B, T', V', L, C]
     Output: [B, T, V, L, C]
 
-    Decoder-side mirror of the flattened-depth encoder design:
-      stage 1: 3D Swin refinement over [D, H, W]
-      stage 2: View Patch Expand      + 3D Swin over [D, H, W]  (V' -> V)
-      stage 3: Temporal Patch Expand  + 3D Swin over [D, H, W]  (T' -> T)
+    Decoder-side mirror of the current commonality encoder:
+      stage 1: 3D Swin Block ×1 with C = 320
+      step 2 : View Patch Expand to restore V
+      stage 2: Temporal Patch Expand + 3D Swin Block ×2 with C = 256
+      output : linear projection 256 -> 192 for the individual decoder
 
     Here D is the flattened depth axis D = T * V used internally by the 3D Swin
-    blocks to jointly model temporal and inter-view correlations.
+    blocks to jointly model temporal and inter-view correlations. Since the
+    encoder now merges both the temporal axis and the view axis before JSCC,
+    the decoder restores view count first and then restores temporal length.
+    The constructor accepts `compressed_num_views` so the training script can
+    pass the explicit post-encoder compressed view count.
     """
-    def __init__(self, dim, input_resolution, num_views=4, depth=2, num_heads=8):
+    def __init__(
+        self,
+        dim,
+        input_resolution,
+        num_views=4,
+        compressed_num_views=None,
+        depths=(1, 2),
+        num_heads=(10, 8),
+        out_dim=192,
+    ):
         super().__init__()
+
         self.num_views = num_views
+        self.compressed_num_views = (
+            compressed_num_views if compressed_num_views is not None else max(1, num_views // 2)
+        )
+        if self.compressed_num_views < 1:
+            raise ValueError(f"compressed_num_views must be >= 1, got {self.compressed_num_views}")
+
+        if isinstance(depths, int):
+            depths = (depths, depths)
+        if len(depths) != 2:
+            raise ValueError(f"MVSC_Commonality_Decoder expects 2 stage depths, got depths={depths}")
+
+        if isinstance(num_heads, int):
+            num_heads = (num_heads, num_heads)
+        if len(num_heads) != 2:
+            raise ValueError(f"MVSC_Commonality_Decoder expects 2 stage head counts, got num_heads={num_heads}")
+
+        if self.num_views % self.compressed_num_views != 0:
+            raise ValueError(
+                f"num_views={self.num_views} must be divisible by compressed_num_views={self.compressed_num_views}"
+            )
+
+        self.in_dim = dim
+        self.stage2_dim = 256
+        self.out_dim = out_dim
 
         self.stage1_swin = BasicLayer3D_Dec(
-            dim=dim,
+            dim=self.in_dim,
             input_resolution=input_resolution,
-            depth=depth,
-            num_heads=num_heads,
-            window_size=8,
+            depth=depths[0],
+            num_heads=num_heads[0],
+            window_size=4,
         )
 
-        self.stage2_expand = ViewPatchExpand(dim=dim, out_dim=dim)
+        self.view_expand = ViewPatchExpand(dim=self.in_dim, out_dim=self.in_dim)
+
+        self.stage2_expand = TemporalPatchExpand(dim=self.in_dim, out_dim=self.stage2_dim)
+
         self.stage2_swin = BasicLayer3D_Dec(
-            dim=dim,
+            dim=self.stage2_dim,
             input_resolution=input_resolution,
-            depth=depth,
-            num_heads=num_heads,
-            window_size=8,
+            depth=depths[1],
+            num_heads=num_heads[1],
+            window_size=4,
         )
 
-        self.stage3_expand = TemporalPatchExpand(dim=dim, out_dim=dim)
-        self.stage3_swin = BasicLayer3D_Dec(
-            dim=dim,
-            input_resolution=input_resolution,
-            depth=depth,
-            num_heads=num_heads,
-            window_size=8,
-        )
+        self.out_proj = nn.Linear(self.stage2_dim, self.out_dim)
 
     def forward(self, x):
-        # x: [B, T, V, L, C]
+        # x: [B, T', V', L, C]
         if x.dim() != 5:
             raise ValueError(f"MVSC_Commonality_Decoder expects [B,T,V,L,C], got shape={tuple(x.shape)}")
+
+        if x.shape[2] != self.compressed_num_views:
+            raise ValueError(
+                f"MVSC_Commonality_Decoder expected compressed view count {self.compressed_num_views}, got V={x.shape[2]}"
+            )
 
         # stage 1: 3D Swin refinement at compressed resolution over flattened D = T * V
         B, T, V, L, C = x.shape
@@ -491,19 +539,17 @@ class MVSC_Commonality_Decoder(nn.Module):
         x = self.stage1_swin(x)
         x = restore_d_to_tv(x, T, V)
 
-        # stage 2: View Patch Expand + 3D Swin  (V -> 2V, then D = T * V)
+        # restore view axis first: V -> 2V, T unchanged
+        x = self.view_expand(x)
+
+        # stage 2: Temporal Patch Expand + 3D Swin  (T -> 2T, V kept after view restoration)
         x = self.stage2_expand(x)
         B, T, V, L, C = x.shape
         x = x.contiguous().view(B, T * V, L, C)
         x = self.stage2_swin(x)
         x = restore_d_to_tv(x, T, V)
 
-        # stage 3: Temporal Patch Expand + 3D Swin  (T -> 2T, then D = T * V)
-        x = self.stage3_expand(x)
-        B, T, V, L, C = x.shape
-        x = x.contiguous().view(B, T * V, L, C)
-        x = self.stage3_swin(x)
-        x = restore_d_to_tv(x, T, V)
+        x = self.out_proj(x)
         return x
 
 
@@ -512,21 +558,31 @@ class MVSC_Individual_Decoder(nn.Module):
     Recover RGB frames from per-view tokens.
     Input:  [B, T, V, L, C]
     Output: [B, T, V, 3, H, W]
+
+    The per-stage numbers of 2D Swin blocks are controlled by
+    `depths=(d1, d2, d3)`. The default mirrors the author-confirmed individual
+    encoder setting `[1, 2, 1]`.
     """
     def __init__(
         self,
         img_size=256,
         patch_size=4,
         out_chans=3,
-        embed_dim=256,
+        embed_dim=192,
         input_resolution=None,
         num_upsample_stages=None,
+        depths=(1, 2, 1),
     ):
         super().__init__()
         self.img_size = img_size
         self.patch_size = patch_size
         self.out_chans = out_chans
         self.embed_dim = embed_dim
+
+        if isinstance(depths, int):
+            depths = (depths, depths, depths)
+        if len(depths) != 3:
+            raise ValueError(f"MVSC_Individual_Decoder expects 3 stage depths, got depths={depths}")
 
         self.target_resolution = (img_size // patch_size, img_size // patch_size)
         self.grid_h, self.grid_w = self.target_resolution
@@ -558,13 +614,13 @@ class MVSC_Individual_Decoder(nn.Module):
 
         self.reconstruct_layers = nn.ModuleList()
         cur_resolution = self.input_resolution
-        for do_upsample in upsample_flags:
+        for stage_idx, do_upsample in enumerate(upsample_flags):
             layer = BasicLayer(
                 dim=embed_dim,
                 out_dim=embed_dim,
                 input_resolution=cur_resolution,
-                depth=2,
-                num_heads=8,
+                depth=depths[stage_idx],
+                num_heads=(3 if stage_idx == 0 else 6 if stage_idx == 1 else 8),
                 window_size=8,
                 upsample=PatchReverseMerging if do_upsample else None,
             )
@@ -634,39 +690,43 @@ class MVSCDecoder(nn.Module):
         img_size=256,
         patch_size=4,
         out_chans=3,
-        embed_dim=256,
+        common_dim=320,
+        individual_dim=192,
         latent_dim=256,
         num_views=4,
         compressed_num_views=None,
-        common_depth=2,
-        common_heads=8,
+        common_depths=(1, 2),
+        common_heads=(10, 8),
+        individual_depths=(1, 2, 1),
     ):
         super().__init__()
         common_input_resolution = (img_size // 8, img_size // 8)
         individual_input_resolution = (img_size // 8, img_size // 8)
 
         if compressed_num_views is None:
-            compressed_num_views = max(1, num_views // 2)
+            compressed_num_views = num_views
 
         self.jscc = MVSC_JSCC_Decoder(
             latent_dim=latent_dim,
-            embed_dim=embed_dim,
+            embed_dim=common_dim,
             compressed_num_views=compressed_num_views,
             temporal_upsample_in_jscc=False,
         )
         self.common = MVSC_Commonality_Decoder(
-            dim=embed_dim,
+            dim=common_dim,
             input_resolution=common_input_resolution,
             num_views=num_views,
-            depth=common_depth,
+            depths=common_depths,
             num_heads=common_heads,
+            out_dim=individual_dim,
         )
         self.individual = MVSC_Individual_Decoder(
             img_size=img_size,
             patch_size=patch_size,
             out_chans=out_chans,
-            embed_dim=embed_dim,
+            embed_dim=individual_dim,
             input_resolution=individual_input_resolution,
+            depths=individual_depths,
         )
 
     def forward(self, x):
@@ -686,19 +746,30 @@ if __name__ == "__main__":
     # 1) JSCC decoder self-test
     # Input latent tokens: [B, D, L, latent_dim]
     # Expected output:      [B, T', V', 1024, embed_dim]
+    # No-upsample version: input L=1024 stays L=1024
     # -----------------------------
     B = 2
     T_comp = 2
     V_comp = 2
     D = T_comp * V_comp
     latent_dim = 256
-    embed_dim = 256
-    L_jscc_in = 1024  # 32 x 32 token grid for no-compression JSCC setting: 32x32 -> 32x32 -> 32x32 -> 32x32
+    common_dim = 320
+    individual_dim = 192
+
+    def check_shape(name, x, expected_shape):
+        actual_shape = tuple(x.shape)
+        expected_shape = tuple(expected_shape)
+        ok = actual_shape == expected_shape
+        status = "OK" if ok else "FAIL"
+        print(f"[{status}] {name}: actual={actual_shape}, expected={expected_shape}")
+        if not ok:
+            raise AssertionError(f"{name} shape mismatch: actual={actual_shape}, expected={expected_shape}")
+    L_jscc_in = 1024  # 32 x 32 token grid, kept unchanged in no-upsample JSCC decoder
 
     x_jscc = torch.randn(B, D, L_jscc_in, latent_dim).to(device)
     jscc_dec = MVSC_JSCC_Decoder(
         latent_dim=latent_dim,
-        embed_dim=embed_dim,
+        embed_dim=common_dim,
         compressed_num_views=V_comp,
         temporal_upsample_in_jscc=False,
     ).to(device)
@@ -709,20 +780,22 @@ if __name__ == "__main__":
     print("[JSCC Decoder]")
     print("input :", x_jscc.shape)
     print("output:", y_jscc.shape)
-    # expected: [2, 2, 2, 1024, 256]   # no-compression JSCC setting keeps 32x32 token resolution
+    # expected: [2, 2, 2, 1024, 320]   # JSCC decoder keeps 32x32 token resolution unchanged
+    check_shape("JSCC Decoder", y_jscc, (B, 2, 2, 1024, common_dim))
 
     # -----------------------------
     # 2) Commonality decoder self-test
     # Input compressed tokens:  [B, T', V', L, C]
     # Expected restored tokens: [B, T,  V,  L, C]
     # -----------------------------
-    x_common = torch.randn(B, 2, 2, 1024, embed_dim).to(device)
+    x_common = torch.randn(B, 2, 2, 1024, common_dim).to(device)
     common_dec = MVSC_Commonality_Decoder(
-        dim=embed_dim,
+        dim=common_dim,
         input_resolution=(32, 32),
         num_views=4,
-        depth=2,
-        num_heads=8,
+        depths=(1, 2),
+        num_heads=(10, 8),
+        out_dim=individual_dim,
     ).to(device)
 
     with torch.no_grad():
@@ -731,21 +804,23 @@ if __name__ == "__main__":
     print("\n[Commonality Decoder]")
     print("input :", x_common.shape)
     print("output:", y_common.shape)
-    # expected: [2, 4, 4, 1024, 256]
+    # expected: [2, 4, 4, 1024, 192]
+    check_shape("Commonality Decoder", y_common, (B, 4, 4, 1024, individual_dim))
 
     # -----------------------------
     # 3) Individual decoder self-test
     # Input per-view tokens: [B, T, V, L, C]
     # Expected RGB output:   [B, T, V, 3, 256, 256]
     # -----------------------------
-    x_ind = torch.randn(B, 4, 4, 1024, embed_dim).to(device)
+    x_ind = torch.randn(B, 4, 4, 1024, individual_dim).to(device)
     ind_dec = MVSC_Individual_Decoder(
         img_size=256,
         patch_size=8,
         out_chans=3,
-        embed_dim=embed_dim,
+        embed_dim=individual_dim,
         input_resolution=(32, 32),
         num_upsample_stages=0,
+        depths=(1, 2, 1),
     ).to(device)
 
     with torch.no_grad():
@@ -755,6 +830,7 @@ if __name__ == "__main__":
     print("input :", x_ind.shape)
     print("output:", y_ind.shape)
     # expected: [2, 4, 4, 3, 256, 256]
+    check_shape("Individual Decoder", y_ind, (B, 4, 4, 3, 256, 256))
 
     # -----------------------------
     # 4) Full MVSC decoder self-test
@@ -765,12 +841,14 @@ if __name__ == "__main__":
         img_size=256,
         patch_size=8,
         out_chans=3,
-        embed_dim=embed_dim,
+        common_dim=common_dim,
+        individual_dim=individual_dim,
         latent_dim=latent_dim,
         num_views=4,
         compressed_num_views=2,
-        common_depth=2,
-        common_heads=8,
+        common_depths=(1, 2),
+        common_heads=(10, 8),
+        individual_depths=(1, 2, 1),
     ).to(device)
 
     with torch.no_grad():
@@ -780,3 +858,6 @@ if __name__ == "__main__":
     print("input :", x_jscc.shape)
     print("output:", y_full.shape)
     # expected: [2, 4, 4, 3, 256, 256]
+    check_shape("Full MVSC Decoder", y_full, (B, 4, 4, 3, 256, 256))
+
+    print("\nAll decoder self-tests passed.")

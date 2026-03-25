@@ -155,34 +155,36 @@ class MVSCNet(nn.Module):
         else:
             img_size = getattr(config, "img_size", 256)
 
-        patch_size = getattr(config, "mvsc_patch_size", 4)
+        encoder_patch_size = getattr(config, "mvsc_encoder_patch_size", 2)
+        decoder_patch_size = getattr(config, "mvsc_decoder_patch_size", 8)
         embed_dim = getattr(config, "mvsc_embed_dim", 96)
         latent_dim = getattr(config, "mvsc_latent_dim", 256)
         num_views = getattr(config, "mvsc_num_views", 4)
         common_depth = getattr(config, "mvsc_common_depth", 2)
-        common_heads = getattr(config, "mvsc_common_heads", 4)
+        common_heads = getattr(config, "mvsc_common_heads", 12)
 
         # -------------------------------------------------
         # encoders
         # -------------------------------------------------
         self.individual_encoder = MVSC_Individual_Encoder(
             img_size=img_size,
-            patch_size=patch_size,
+            patch_size=encoder_patch_size,
             in_chans=3,
             embed_dim=embed_dim,
         )
 
         token_resolution = self.individual_encoder.output_resolution
+        token_dim = self.individual_encoder.output_dim
 
         self.commonality_encoder = MVSC_Commonality_Encoder(
-            dim=embed_dim,
+            dim=token_dim,
             input_resolution=token_resolution,
             depth=common_depth,
             num_heads=common_heads,
         )
 
         self.jscc_encoder = MVSC_JSCC_Encoder(
-            dim=embed_dim,
+            dim=token_dim,
             latent_dim=latent_dim,
         )
 
@@ -196,11 +198,12 @@ class MVSCNet(nn.Module):
         # -------------------------------------------------
         self.jscc_decoder = MVSC_JSCC_Decoder(
             latent_dim=latent_dim,
-            embed_dim=embed_dim,
+            embed_dim=token_dim,
+            compressed_num_views=max(1, num_views // 2),
         )
 
         self.commonality_decoder = MVSC_Commonality_Decoder(
-            dim=embed_dim,
+            dim=token_dim,
             input_resolution=token_resolution,
             num_views=num_views,
             depth=common_depth,
@@ -209,11 +212,11 @@ class MVSCNet(nn.Module):
 
         self.individual_decoder = MVSC_Individual_Decoder(
             img_size=img_size,
-            patch_size=patch_size,
+            patch_size=decoder_patch_size,
             out_chans=3,
-            embed_dim=embed_dim,
+            embed_dim=token_dim,
             input_resolution=token_resolution,
-            num_upsample_stages=self.individual_encoder.num_downsample_stages,
+            num_upsample_stages=0,
         )
 
         # -------------------------------------------------
@@ -227,9 +230,9 @@ class MVSCNet(nn.Module):
             x_g: [B, T, V, 3, H, W]
 
         Returns:
-            L_g: [B, T, V, L, C]
-            S_g: [B, T, V, L, C]
-            y:   [B, T, V, Lc, latent_dim]
+            L_g: [B, T, V, L, C_token]
+            S_g: [B, T', V', L, C_token]
+            y:   [B, D, Lc, latent_dim]
         """
         L_g = self.individual_encoder(x_g)
         S_g = self.commonality_encoder(L_g)
@@ -239,11 +242,11 @@ class MVSCNet(nn.Module):
     def decode(self, y_hat):
         """
         Args:
-            y_hat: [B, T, V, Lc, latent_dim]
+            y_hat: [B, D, Lc, latent_dim]
 
         Returns:
-            S_hat: [B, T, V, L, C]
-            L_hat: [B, T, V, L, C]
+            S_hat: [B, T', V', L, C_token]
+            L_hat: [B, T,  V,  L, C_token]
             x_hat: [B, T, V, 3, H, W]
         """
         S_hat = self.jscc_decoder(y_hat)
@@ -335,3 +338,43 @@ class MVSCNet(nn.Module):
             "cbr_weight": self.cbr_weight,
         }
         return x_hat, used_snr, loss, aux
+
+if __name__ == "__main__":
+    class DummyArgs:
+        multiple_snr = "10"
+        cbr_weight = 0.0
+        cbr_bits_per_component = 3.0
+        distortion_metric = "MSE"
+        C = "16"
+        model = "MVSC"
+        channel_type = "awgn"
+    
+    class DummyConfig:
+        image_dims = (3, 256, 256)
+        mvsc_encoder_patch_size = 2
+        mvsc_decoder_patch_size = 8
+        mvsc_embed_dim = 96
+        mvsc_latent_dim = 256
+        mvsc_num_views = 4
+        mvsc_common_depth = 2
+        mvsc_common_heads = 12
+        norm = False
+        logger = None
+        pass_channel = True
+        downsample = 2
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = MVSCNet(DummyArgs(), DummyConfig()).to(device)
+    x = torch.randn(2, 4, 4, 3, 256, 256).to(device)
+
+    with torch.no_grad():
+        x_hat, used_snr, loss, aux = model(x)
+
+    print("[MVSCNet]")
+    print("input :", x.shape)
+    print("output:", x_hat.shape)
+    print("used_snr:", used_snr)
+    print("loss:", float(loss))
+    print("distortion:", float(aux["distortion"]))
+    print("cbr:", float(aux["cbr"]))

@@ -46,6 +46,17 @@ class AdaptiveModulator(nn.Module):
             snr = snr.unsqueeze(-1)
         return self.net(snr)
 
+
+def _infer_hw_from_l(l_value: int):
+    h = int(math.sqrt(l_value))
+    w = h
+    if h * w != l_value:
+        raise ValueError(
+            f"Cannot infer non-square token resolution from L={l_value}. "
+            f"Please pass hw=(H,W) explicitly."
+        )
+    return h, w
+
 class SwinTransformerBlock(nn.Module):
 
     def __init__(self, dim, input_resolution, num_heads, window_size=7, shift_size=0,
@@ -57,85 +68,118 @@ class SwinTransformerBlock(nn.Module):
         self.num_heads = num_heads
         self.window_size = window_size
         self.shift_size = shift_size
+        self.base_shift_size = shift_size
         self.mlp_ratio = mlp_ratio
+
         if min(self.input_resolution) <= self.window_size:
-            # if window size is larger than input resolution, we don't partition windows
             self.shift_size = 0
             self.window_size = min(self.input_resolution)
+
         assert 0 <= self.shift_size < self.window_size, "shift_size must in 0-window_size"
 
         self.norm1 = norm_layer(dim)
         self.attn = WindowAttention(
-            dim, window_size=to_2tuple(self.window_size), num_heads=num_heads,
-            qkv_bias=qkv_bias, qk_scale=qk_scale)
+            dim,
+            window_size=to_2tuple(self.window_size),
+            num_heads=num_heads,
+            qkv_bias=qkv_bias,
+            qk_scale=qk_scale,
+        )
 
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer)
+        self.mlp = Mlp(
+            in_features=dim,
+            hidden_features=mlp_hidden_dim,
+            act_layer=act_layer
+        )
 
-        if self.shift_size > 0:
-            # calculate attention mask for SW-MSA
-            H, W = self.input_resolution
-            img_mask = torch.zeros((1, H, W, 1))  # 1 H W 1
-            h_slices = (slice(0, -self.window_size),
-                        slice(-self.window_size, -self.shift_size),
-                        slice(-self.shift_size, None))
-            w_slices = (slice(0, -self.window_size),
-                        slice(-self.window_size, -self.shift_size),
-                        slice(-self.shift_size, None))
-            cnt = 0
-            for h in h_slices:
-                for w in w_slices:
-                    img_mask[:, h, w, :] = cnt
-                    cnt += 1
+        self._mask_cache = {}
 
-            mask_windows = window_partition(img_mask, self.window_size)  # nW, window_size, window_size, 1
-            mask_windows = mask_windows.view(-1, self.window_size * self.window_size)
-            attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
-            attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(attn_mask == 0, float(0.0))
-        else:
-            attn_mask = None
+    @staticmethod
+    def _make_slices(length, window, shift):
+        if shift == 0:
+            return (slice(0, length),)
+        return (
+            slice(0, -window),
+            slice(-window, -shift),
+            slice(-shift, None),
+        )
 
-        self.register_buffer("attn_mask", attn_mask)
+    def _compute_attn_mask(self, Hp, Wp, shift_size, device):
+        if shift_size == 0:
+            return None
+
+        key = (Hp, Wp, shift_size, device.type, device.index)
+        if key in self._mask_cache:
+            return self._mask_cache[key]
+
+        img_mask = torch.zeros((1, Hp, Wp, 1), device=device)
+
+        h_slices = self._make_slices(Hp, self.window_size, shift_size)
+        w_slices = self._make_slices(Wp, self.window_size, shift_size)
+
+        cnt = 0
+        for h in h_slices:
+            for w in w_slices:
+                img_mask[:, h, w, :] = cnt
+                cnt += 1
+
+        mask_windows = window_partition(img_mask, self.window_size)
+        mask_windows = mask_windows.view(-1, self.window_size * self.window_size)
+        attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
+        attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(attn_mask == 0, float(0.0))
+
+        self._mask_cache[key] = attn_mask
+        return attn_mask
 
     def forward(self, x):
         H, W = self.input_resolution
         B, L, C = x.shape
-        assert L == H * W, "input feature has wrong size"
+        assert L == H * W, f"input feature has wrong size: {L} vs {H*W}"
 
         shortcut = x
         x = self.norm1(x)
         x = x.view(B, H, W, C)
 
-        # cyclic shift
-        if self.shift_size > 0:
-            shifted_x = torch.roll(x, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2))
+        pad_h = (self.window_size - H % self.window_size) % self.window_size
+        pad_w = (self.window_size - W % self.window_size) % self.window_size
+
+        if pad_h > 0 or pad_w > 0:
+            x = x.permute(0, 3, 1, 2).contiguous()   # [B,C,H,W]
+            x = F.pad(x, (0, pad_w, 0, pad_h))
+            x = x.permute(0, 2, 3, 1).contiguous()   # [B,H,W,C]
+
+        Hp, Wp = H + pad_h, W + pad_w
+
+        shift_size = self.shift_size if (Hp > self.window_size and Wp > self.window_size) else 0
+
+        if shift_size > 0:
+            shifted_x = torch.roll(x, shifts=(-shift_size, -shift_size), dims=(1, 2))
         else:
             shifted_x = x
 
-        # partition windows
-        x_windows = window_partition(shifted_x, self.window_size)  # nW*B, window_size, window_size, C
-        x_windows = x_windows.view(-1, self.window_size * self.window_size, C)  # nW*B, window_size*window_size, C
-        B_, N, C = x_windows.shape
+        attn_mask = self._compute_attn_mask(Hp, Wp, shift_size, x.device)
 
-        # merge windows
-        attn_windows = self.attn(x_windows,
-                                 add_token=False,
-                                 mask=self.attn_mask)
+        x_windows = window_partition(shifted_x, self.window_size)
+        x_windows = x_windows.view(-1, self.window_size * self.window_size, C)
+
+        attn_windows = self.attn(x_windows, add_token=False, mask=attn_mask)
         attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
-        shifted_x = window_reverse(attn_windows, self.window_size, H, W)  # B H' W' C
 
-        # reverse cyclic shift
-        if self.shift_size > 0:
-            x = torch.roll(shifted_x, shifts=(self.shift_size, self.shift_size), dims=(1, 2))
+        shifted_x = window_reverse(attn_windows, self.window_size, Hp, Wp)
+
+        if shift_size > 0:
+            x = torch.roll(shifted_x, shifts=(shift_size, shift_size), dims=(1, 2))
         else:
             x = shifted_x
-        x = x.view(B, H * W, C)
 
-        # FFN
+        if pad_h > 0 or pad_w > 0:
+            x = x[:, :H, :W, :]
+
+        x = x.view(B, H * W, C)
         x = shortcut + x
         x = x + self.mlp(self.norm2(x))
-
         return x
 
     def extra_repr(self) -> str:
@@ -145,41 +189,15 @@ class SwinTransformerBlock(nn.Module):
     def flops(self):
         flops = 0
         H, W = self.input_resolution
-        # norm1
         flops += self.dim * H * W
-        # W-MSA/SW-MSA
         nW = H * W / self.window_size / self.window_size
         flops += nW * self.attn.flops(self.window_size * self.window_size)
-        # mlp
         flops += 2 * H * W * self.dim * self.dim * self.mlp_ratio
-        # norm2
         flops += self.dim * H * W
         return flops
 
     def update_mask(self):
-        if self.shift_size > 0:
-            # calculate attention mask for SW-MSA
-            H, W = self.input_resolution
-            img_mask = torch.zeros((1, H, W, 1))  # 1 H W 1
-            h_slices = (slice(0, -self.window_size),
-                        slice(-self.window_size, -self.shift_size),
-                        slice(-self.shift_size, None))
-            w_slices = (slice(0, -self.window_size),
-                        slice(-self.window_size, -self.shift_size),
-                        slice(-self.shift_size, None))
-            cnt = 0
-            for h in h_slices:
-                for w in w_slices:
-                    img_mask[:, h, w, :] = cnt
-                    cnt += 1
-
-            mask_windows = window_partition(img_mask, self.window_size)  # nW, window_size, window_size, 1
-            mask_windows = mask_windows.view(-1, self.window_size * self.window_size)
-            attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
-            attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(attn_mask == 0, float(0.0))
-            self.attn_mask = attn_mask.cuda()
-        else:
-            pass
+        self._mask_cache = {}
 
 
 class BasicLayer(nn.Module):
@@ -368,19 +386,19 @@ class SwinTransformerBlock3D(nn.Module):
     ):
         super().__init__()
         self.dim = dim
-        self.input_resolution = input_resolution  # (H, W)
+        self.input_resolution = input_resolution
         self.num_heads = num_heads
 
         if isinstance(window_size, int):
-            window_size = (2, window_size, window_size)
+            window_size = (window_size, window_size, window_size)
         elif len(window_size) == 2:
-            window_size = (2, window_size[0], window_size[1])
+            window_size = (window_size[0], window_size[0], window_size[1])
         self.window_size = tuple(window_size)
 
         if isinstance(shift_size, int):
             shift_size = (shift_size, shift_size, shift_size)
         elif len(shift_size) == 2:
-            shift_size = (0, shift_size[0], shift_size[1])
+            shift_size = (shift_size[0], shift_size[0], shift_size[1])
         self.shift_size = tuple(shift_size)
 
         self.norm1 = norm_layer(dim)
@@ -436,7 +454,6 @@ class SwinTransformerBlock3D(nn.Module):
         return attn_mask
 
     def forward(self, x):
-        # x: [B, T, L, C]
         H, W = self.input_resolution
         B, T, L, C = x.shape
         assert L == H * W, f"input token size mismatch: {L} vs {H*W}"
@@ -498,10 +515,11 @@ class BasicLayer3D(nn.Module):
 
     def __init__(self, dim, input_resolution, depth, num_heads, window_size=8):
         super().__init__()
+        self.input_resolution = input_resolution
         if isinstance(window_size, int):
-            window_size_3d = (2, window_size, window_size)
+            window_size_3d = (window_size, window_size, window_size)
         elif len(window_size) == 2:
-            window_size_3d = (2, window_size[0], window_size[1])
+            window_size_3d = (window_size[0], window_size[0], window_size[1])
         else:
             window_size_3d = tuple(window_size)
 
@@ -529,6 +547,11 @@ class BasicLayer3D(nn.Module):
             x = blk(x)
         return x
 
+    def update_resolution(self, H, W):
+        self.input_resolution = (H, W)
+        for blk in self.blocks:
+            blk.input_resolution = (H, W)
+
 
 class ViewFusionBlock(nn.Module):
     """Cross-view self-attention block on [B, T, V, L, C]."""
@@ -545,7 +568,6 @@ class ViewFusionBlock(nn.Module):
         )
 
     def forward(self, x):
-        # x: [B, T, V, L, C]
         B, T, V, L, C = x.shape
         y = x.permute(0, 1, 3, 2, 4).contiguous().view(B * T * L, V, C)
 
@@ -588,7 +610,8 @@ class JSCCDownBlock(nn.Module):
         x = self.down(x)
         x = self.res_blocks(x)
         return x
-    
+
+
 class ConvResidualBlock3D(nn.Module):
     """Residual 3D conv block used by JSCC encoder stacks over [T, H, W]."""
 
@@ -621,40 +644,32 @@ class JSCCDownBlock3D(nn.Module):
         return x
 
 
-
 class MVSC_Individual_Encoder(nn.Module):
     """
     Individual semantic encoder (2D Swin).
-    Processes each (view, frame) independently.
-
-    Paper-aligned stage layout:
-      stage 1: Patch Embedding + 2D Swin   -> H/2, W/2
-      stage 2: Patch Merging  + 2D Swin    -> H/4, W/4
-      stage 3: Patch Merging  + 2D Swin    -> H/8, W/8
+    Supports dynamic input resolution as long as H and W are divisible by 8.
 
     Input:  [B, T, V, 3, H, W]
     Output: [B, T, V, L, C]
-
-    Hierarchical channel design:
-      stage 1: C1 = embed_dim
-      stage 2: C2 = 2 * embed_dim
-      stage 3: C3 = 4 * embed_dim
+    Optional: return spatial token resolution hw=(H/8, W/8)
     """
 
-    def __init__(self, img_size=256, patch_size=2, in_chans=3, embed_dim=96):
+    def __init__(self, img_size=256, patch_size=2, in_chans=3, embed_dim=96, depths=(1, 2, 1)):
         super().__init__()
 
         if isinstance(img_size, int):
             img_size = (img_size, img_size)
+        if isinstance(depths, int):
+            depths = (depths, depths, depths)
+        if len(depths) != 3:
+            raise ValueError(f"MVSC_Individual_Encoder expects 3 stage depths, got depths={depths}")
         self.img_size = img_size
         self.patch_size = patch_size
         self.embed_dim = embed_dim
 
-        # Use a SwinJSCC-style smoother channel schedule for the 3-stage
-        # individual encoder while keeping the MVSC 3-stage / H/8 design.
-        c1 = 128
-        c2 = 192
-        c3 = 256
+        c1 = 96
+        c2 = 144
+        c3 = 192
 
         stage1_resolution = (img_size[0] // patch_size, img_size[1] // patch_size)
         stage2_resolution = (stage1_resolution[0] // 2, stage1_resolution[1] // 2)
@@ -679,8 +694,8 @@ class MVSC_Individual_Encoder(nn.Module):
                     dim=c1,
                     out_dim=c1,
                     input_resolution=stage1_resolution,
-                    depth=2,
-                    num_heads=4,
+                    depth=depths[0],
+                    num_heads=3,
                     window_size=8,
                     downsample=None,
                 ),
@@ -688,7 +703,7 @@ class MVSC_Individual_Encoder(nn.Module):
                     dim=c2,
                     out_dim=c2,
                     input_resolution=stage2_resolution,
-                    depth=2,
+                    depth=depths[1],
                     num_heads=6,
                     window_size=8,
                     downsample=None,
@@ -697,7 +712,7 @@ class MVSC_Individual_Encoder(nn.Module):
                     dim=c3,
                     out_dim=c3,
                     input_resolution=stage3_resolution,
-                    depth=2,
+                    depth=depths[2],
                     num_heads=8,
                     window_size=8,
                     downsample=None,
@@ -708,43 +723,55 @@ class MVSC_Individual_Encoder(nn.Module):
         self.output_resolution = stage3_resolution
         self.output_dim = c3
 
-    def forward(self, x):
+    def _update_dynamic_resolution(self, H, W):
+        if H % 8 != 0 or W % 8 != 0:
+            raise ValueError(f"MVSC_Individual_Encoder expects H and W divisible by 8, got {(H, W)}")
+
+        stage1_resolution = (H // self.patch_size, W // self.patch_size)
+        stage2_resolution = (stage1_resolution[0] // 2, stage1_resolution[1] // 2)
+        stage3_resolution = (stage2_resolution[0] // 2, stage2_resolution[1] // 2)
+
+        if hasattr(self.patch_processing[1], "input_resolution"):
+            self.patch_processing[1].input_resolution = stage1_resolution
+        if hasattr(self.patch_processing[2], "input_resolution"):
+            self.patch_processing[2].input_resolution = stage2_resolution
+
+        self.swin_layers[0].update_resolution(*stage1_resolution)
+        self.swin_layers[1].update_resolution(*stage2_resolution)
+        self.swin_layers[2].update_resolution(*stage3_resolution)
+
+        self.output_resolution = stage3_resolution
+
+    def forward(self, x, return_hw=False):
         B, T, V, C, H, W = x.shape
-        assert (H, W) == self.img_size, f"Expected input size {self.img_size}, but got {(H, W)}"
+        self._update_dynamic_resolution(H, W)
 
         x = x.contiguous().view(B * T * V, C, H, W)
 
-        # stage 1: Patch Embedding + 2D Swin
         x = self.patch_processing[0](x)
         x = self.swin_layers[0](x)
 
-        # stage 2: Patch Merging + 2D Swin
         x = self.patch_processing[1](x)
         x = self.swin_layers[1](x)
 
-        # stage 3: Patch Merging + 2D Swin
         x = self.patch_processing[2](x)
         x = self.swin_layers[2](x)
 
         L = x.shape[1]
         C = x.shape[2]
-        assert L == self.output_resolution[0] * self.output_resolution[1], (
-            f"Token number mismatch: got L={L}, expected {self.output_resolution[0] * self.output_resolution[1]}"
-        )
+        expected_l = self.output_resolution[0] * self.output_resolution[1]
+        assert L == expected_l, f"Token number mismatch: got L={L}, expected {expected_l}"
         assert C == self.output_dim, f"Channel mismatch: got C={C}, expected {self.output_dim}"
 
         x = x.contiguous().view(B, T, V, L, C)
+        if return_hw:
+            return x, self.output_resolution
         return x
 
 
 class TemporalPatchEmbedding(nn.Module):
     """
     Patch embedding for the spatio-temporal commonality encoder.
-    It projects per-frame tokens before the later temporal/view merging stages
-    while keeping the spatial token grid unchanged.
-
-    Input:  [B, T, V, L, C]
-    Output: [B, T, V, L, C]
     """
 
     def __init__(self, dim, out_dim=None, norm_layer=nn.LayerNorm):
@@ -761,14 +788,11 @@ class TemporalPatchEmbedding(nn.Module):
         x = self.proj(x)
         return x
 
+
 class TemporalPatchMerging(nn.Module):
     """
-    Patch processing for the spatio-temporal commonality encoder.
-    It merges adjacent tokens along the temporal axis while preserving the view
+    Merge adjacent tokens along the temporal axis while preserving the view
     dimension and the spatial token grid.
-
-    Input:  [B, T, V, L, C]
-    Output: [B, T_out, V, L, C]
     """
 
     def __init__(self, dim, out_dim=None, norm_layer=nn.LayerNorm):
@@ -784,7 +808,6 @@ class TemporalPatchMerging(nn.Module):
 
         B, T, V, L, C = x.shape
 
-        # Pad one frame when T is odd so that adjacent-frame merging is well-defined.
         if T % 2 == 1:
             pad = x[:, -1:, :, :, :]
             x = torch.cat([x, pad], dim=1)
@@ -792,19 +815,13 @@ class TemporalPatchMerging(nn.Module):
 
         x0 = x[:, 0::2, :, :, :]
         x1 = x[:, 1::2, :, :, :]
-        x = torch.cat([x0, x1], dim=-1)  # [B, T/2, V, L, 2C]
+        x = torch.cat([x0, x1], dim=-1)
         x = self.norm(x)
         x = self.reduction(x)
         return x
 
 
 def flatten_tv_to_d(x):
-    """
-    Flatten temporal and view dimensions into a single depth axis for 3D Swin.
-
-    Input:  [B, T, V, L, C]
-    Output: [B, D, L, C], where D = T * V
-    """
     if x.dim() != 5:
         raise ValueError(f"flatten_tv_to_d expects [B,T,V,L,C], got shape={tuple(x.shape)}")
     B, T, V, L, C = x.shape
@@ -812,12 +829,6 @@ def flatten_tv_to_d(x):
 
 
 def restore_d_to_tv(x, T, V):
-    """
-    Restore a flattened depth axis back to explicit temporal and view axes.
-
-    Input:  [B, D, L, C]
-    Output: [B, T, V, L, C]
-    """
     if x.dim() != 4:
         raise ValueError(f"restore_d_to_tv expects [B,D,L,C], got shape={tuple(x.shape)}")
     B, D, L, C = x.shape
@@ -826,91 +837,85 @@ def restore_d_to_tv(x, T, V):
     return x.contiguous().view(B, T, V, L, C)
 
 
-# Commonality encoder first reduces temporal redundancy and then reduces inter-view redundancy.
 class MVSC_Commonality_Encoder(nn.Module):
     """
     Spatio-temporal commonality encoder.
-    Input:  [B, T, V, L, C]
-    Output: [B, T', V', L, C]
-
-    Paper-aligned stage layout under the current implementation:
-      stage 1: Temporal Patch Embedding + 3D Swin over [D, H, W]
-      stage 2: Temporal Patch Merging   + 3D Swin over [D, H, W]
-      stage 3: View Patch Merging       + 3D Swin over [D, H, W]
-
-    Here D is a flattened depth axis defined by D = T * V. This lets the 3D Swin
-    blocks jointly model temporal and inter-view correlations using a standard 3D
-    window attention implementation.
+    Supports dynamic spatial token resolution passed by hw=(H,W).
     """
 
-    def __init__(self, dim, input_resolution, depth=2, num_heads=8):
+    def __init__(self, dim, input_resolution, depths=(2, 1), num_heads=(8, 10)):
         super().__init__()
 
-        self.stage1_patch = TemporalPatchEmbedding(dim=dim, out_dim=dim)
+        if isinstance(depths, int):
+            depths = (depths, depths)
+        if len(depths) != 2:
+            raise ValueError(f"MVSC_Commonality_Encoder expects 2 stage depths, got depths={depths}")
+
+        if isinstance(num_heads, int):
+            num_heads = (num_heads, num_heads)
+        if len(num_heads) != 2:
+            raise ValueError(f"MVSC_Commonality_Encoder expects 2 stage head counts, got num_heads={num_heads}")
+
+        self.stage1_dim = 256
+        self.stage2_dim = 320
+
+        self.stage1_patch = TemporalPatchEmbedding(dim=dim, out_dim=self.stage1_dim)
         self.stage1_swin = BasicLayer3D(
-            dim=dim,
+            dim=self.stage1_dim,
             input_resolution=input_resolution,
-            depth=depth,
-            num_heads=num_heads,
-            window_size=8,
+            depth=depths[0],
+            num_heads=num_heads[0],
+            window_size=4,
         )
 
-        self.stage2_patch = TemporalPatchMerging(dim=dim, out_dim=dim)
+        self.stage2_patch = TemporalPatchMerging(dim=self.stage1_dim, out_dim=self.stage2_dim)
         self.stage2_swin = BasicLayer3D(
-            dim=dim,
+            dim=self.stage2_dim,
             input_resolution=input_resolution,
-            depth=depth,
-            num_heads=num_heads,
-            window_size=8,
+            depth=depths[1],
+            num_heads=num_heads[1],
+            window_size=4,
         )
+        self.view_merge = ViewPatchMerging(dim=self.stage2_dim, out_dim=self.stage2_dim)
+        self.output_dim = self.stage2_dim
 
-        self.stage3_patch = ViewPatchMerging(dim=dim, out_dim=dim)
-        self.stage3_swin = BasicLayer3D(
-            dim=dim,
-            input_resolution=input_resolution,
-            depth=depth,
-            num_heads=num_heads,
-            window_size=8,
-        )
-
-    def forward(self, x):
-        # x: [B, T, V, L, C]
+    def forward(self, x, hw=None, return_hw=False):
         if x.dim() != 5:
             raise ValueError(f"MVSC_Commonality_Encoder expects [B,T,V,L,C], got shape={tuple(x.shape)}")
 
-        # stage 1: Temporal Patch Embedding + 3D Swin over flattened depth D = T * V
+        _, _, _, L, _ = x.shape
+        if hw is None:
+            hw = _infer_hw_from_l(L)
+        H, W = hw
+        if H * W != L:
+            raise ValueError(f"MVSC_Commonality_Encoder hw mismatch: hw={hw}, but L={L}")
+
+        self.stage1_swin.update_resolution(H, W)
+        self.stage2_swin.update_resolution(H, W)
+
         x = self.stage1_patch(x)
         B, T, V, L, C = x.shape
         x = flatten_tv_to_d(x)
         x = self.stage1_swin(x)
         x = restore_d_to_tv(x, T, V)
 
-        # stage 2: Temporal Patch Merging + 3D Swin  (T -> T/2, then D = T * V)
         x = self.stage2_patch(x)
         B, T, V, L, C = x.shape
         x = flatten_tv_to_d(x)
         x = self.stage2_swin(x)
         x = restore_d_to_tv(x, T, V)
 
-        # stage 3: View Patch Merging + 3D Swin  (V -> V/2, then D = T * V)
-        x = self.stage3_patch(x)
-        B, T, V, L, C = x.shape
-        x = flatten_tv_to_d(x)
-        x = self.stage3_swin(x)
-        x = restore_d_to_tv(x, T, V)
+        x = self.view_merge(x)
 
+        if return_hw:
+            return x, hw
         return x
 
 
-# ViewPatchMerging for spatio-temporal commonality encoder
 class ViewPatchMerging(nn.Module):
     """
-    Patch processing for the spatio-temporal commonality encoder.
-    It merges adjacent tokens along the view axis while keeping the temporal
+    Merge adjacent tokens along the view axis while keeping the temporal
     dimension explicit and preserving the spatial token grid.
-
-    Input:  [B, T, V, L, C]
-    Output: [B, T, V_out, L, C]
     """
 
     def __init__(self, dim, out_dim=None, norm_layer=nn.LayerNorm):
@@ -926,7 +931,6 @@ class ViewPatchMerging(nn.Module):
 
         B, T, V, L, C = x.shape
 
-        # Pad one view when V is odd so that adjacent-view merging is well-defined.
         if V % 2 == 1:
             pad = x[:, :, -1:, :, :]
             x = torch.cat([x, pad], dim=2)
@@ -934,95 +938,106 @@ class ViewPatchMerging(nn.Module):
 
         x0 = x[:, :, 0::2, :, :]
         x1 = x[:, :, 1::2, :, :]
-        x = torch.cat([x0, x1], dim=-1)  # [B, T, V/2, L, 2C]
+        x = torch.cat([x0, x1], dim=-1)
         x = self.norm(x)
         x = self.reduction(x)
         return x
 
+def _round_channels(value, multiple=8):
+    value = int(round(value / multiple) * multiple)
+    return max(multiple, value)
 
 class MVSC_JSCC_Encoder(nn.Module):
     """
-    JSCC encoder.
+    JSCC encoder with dynamic spatial token resolution support.
 
     Input:
-      [B, T, V, L, C]  (preferred)
-      [B, D, L, C]     (fallback, already flattened)
+      [B, T, V, L, C]  or [B, D, L, C]
 
     Output:
       [B, D_jscc, L_jscc, C_latent]
 
-    In the current configuration, the JSCC encoder is set to a fully
-    non-compressive mode: it preserves the input depth axis and spatial token
-    resolution, and only maps the feature channels to the latent space.
-
-    For 5D input, the temporal and view axes are flattened into a single depth
-    axis D = T * V before applying 3D convolutions over [D, H, W].
+    Note:
+      - Current compression policy is unchanged: spatial grid is compressed
+        twice (H,W) -> (H/2,W/2) -> (H/4,W/4).
+      - To support non-square / high-resolution inference, pass hw=(H,W)
+        explicitly. If omitted, only square token maps can be inferred.
     """
 
     def __init__(self, dim, latent_dim=256):
         super().__init__()
-        # Fully non-compressive JSCC encoder:
-        # keep depth D and spatial resolution H/W unchanged in all three blocks,
-        # and only perform feature transformation.
+
+        gap = dim - latent_dim
+        mid1 = _round_channels(dim - gap / 3)        # 例如 320 -> 256
+        mid2 = _round_channels(dim - 2 * gap / 3)    # 例如 320 -> 192
+
+        mid1 = max(latent_dim, min(dim, mid1))
+        mid2 = max(latent_dim, min(mid1, mid2))
+
         self.blocks = nn.ModuleList(
             [
-                JSCCDownBlock3D(dim, dim, stride=(1, 1, 1), num_res_blocks=3),
-                JSCCDownBlock3D(dim, dim, stride=(1, 1, 1), num_res_blocks=3),
-                JSCCDownBlock3D(dim, latent_dim, stride=(1, 1, 1), num_res_blocks=3),
+                JSCCDownBlock3D(dim,  mid1,      stride=(1, 2, 2), num_res_blocks=3),  # 32 -> 16
+                JSCCDownBlock3D(mid1, mid2,      stride=(1, 2, 2), num_res_blocks=3),  # 16 -> 8
+                JSCCDownBlock3D(mid2, latent_dim, stride=(1, 1, 1), num_res_blocks=3), # 8 -> 8
             ]
         )
 
-    def forward(self, x):
+    def _forward_flattened(self, x, hw):
+        B, D, L, C = x.shape
+        H, W = hw
+        if H * W != L:
+            raise ValueError(f"MVSC_JSCC_Encoder hw mismatch: hw={hw}, but L={L}")
+
+        x = x.view(B, D, H, W, C).permute(0, 4, 1, 2, 3).contiguous()
+        for block in self.blocks:
+            x = block(x)
+
+        _, c, d_out, h_out, w_out = x.shape
+        x = x.permute(0, 2, 3, 4, 1).contiguous().view(B, d_out, h_out * w_out, c)
+        return x, (h_out, w_out)
+
+    def forward(self, x, hw=None, return_hw=False):
         if x.dim() == 4:
             B, D, L, C = x.shape
-            h = int(math.sqrt(L))
-            w = h
-            if h * h != L:
-                raise ValueError(f"MVSC_JSCC_Encoder expects square token map, but got L={L}.")
-
-            x = x.view(B, D, h, w, C).permute(0, 4, 1, 2, 3).contiguous()  # [B, C, D, H, W]
-            for block in self.blocks:
-                x = block(x)
-
-            _, c, d_out, h_out, w_out = x.shape
-            x = x.permute(0, 2, 3, 4, 1).contiguous().view(B, d_out, h_out * w_out, c)
+            if hw is None:
+                hw = _infer_hw_from_l(L)
+            x, out_hw = self._forward_flattened(x, hw)
+            if return_hw:
+                return x, out_hw
             return x
 
         if x.dim() == 5:
             B, T, V, L, C = x.shape
-            h = int(math.sqrt(L))
-            w = h
-            if h * h != L:
-                raise ValueError(f"MVSC_JSCC_Encoder expects square token map, but got L={L}.")
+            if hw is None:
+                hw = _infer_hw_from_l(L)
 
             x = flatten_tv_to_d(x)
-            B, D, L, C = x.shape
-            x = x.view(B, D, h, w, C).permute(0, 4, 1, 2, 3).contiguous()  # [B, C, D, H, W]
-
-            for block in self.blocks:
-                x = block(x)
-
-            _, c, d_out, h_out, w_out = x.shape
-            x = x.permute(0, 2, 3, 4, 1).contiguous().view(B, d_out, h_out * w_out, c)
+            x, out_hw = self._forward_flattened(x, hw)
+            if return_hw:
+                return x, out_hw
             return x
 
         raise ValueError(f"MVSC_JSCC_Encoder expects 4D/5D tokens, got shape={tuple(x.shape)}")
-    
+
 
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # -----------------------------
-    # 1) Individual encoder self-test
-    # Input RGB GOP:        [B, T, V, 3, 256, 256]
-    # Expected token output:[B, T, V, 1024, 384]
-    # -----------------------------
     B = 2
     T = 4
     V = 4
     embed_dim = 96
-    token_dim = 256   # fixed 3-stage channel schedule: 128 -> 192 -> 256
+    token_dim = 192
     latent_dim = 256
+
+    def check_shape(name, x, expected_shape):
+        actual_shape = tuple(x.shape)
+        expected_shape = tuple(expected_shape)
+        ok = actual_shape == expected_shape
+        status = "OK" if ok else "FAIL"
+        print(f"[{status}] {name}: actual={actual_shape}, expected={expected_shape}")
+        if not ok:
+            raise AssertionError(f"{name} shape mismatch: actual={actual_shape}, expected={expected_shape}")
 
     x_rgb = torch.randn(B, T, V, 3, 256, 256).to(device)
     ind_enc = MVSC_Individual_Encoder(
@@ -1030,63 +1045,53 @@ if __name__ == "__main__":
         patch_size=2,
         in_chans=3,
         embed_dim=embed_dim,
+        depths=(1, 2, 1),
     ).to(device)
 
     with torch.no_grad():
-        y_ind = ind_enc(x_rgb)
+        y_ind, hw_ind = ind_enc(x_rgb, return_hw=True)
 
     print("[Individual Encoder]")
     print("input :", x_rgb.shape)
-    print("output:", y_ind.shape)
-    # expected: [2, 4, 4, 1024, 256]
+    print("output:", y_ind.shape, "hw:", hw_ind)
+    check_shape("Individual Encoder", y_ind, (B, T, V, 1024, token_dim))
 
-    # -----------------------------
-    # 2) Commonality encoder self-test
-    # Input tokens:         [B, T, V, L, C]
-    # Expected compressed:  [B, 2, 2, 1024, 256]
-    # -----------------------------
     common_enc = MVSC_Commonality_Encoder(
         dim=token_dim,
         input_resolution=(32, 32),
-        depth=2,
-        num_heads=8,
+        depths=(2, 1),
+        num_heads=(8, 10),
     ).to(device)
 
     with torch.no_grad():
-        y_common = common_enc(y_ind)
+        y_common, hw_common = common_enc(y_ind, hw=hw_ind, return_hw=True)
 
     print("\n[Commonality Encoder]")
     print("input :", y_ind.shape)
-    print("output:", y_common.shape)
-    # expected: [2, 2, 2, 1024, 256]
+    print("output:", y_common.shape, "hw:", hw_common)
+    check_shape("Commonality Encoder", y_common, (B, 2, 2, 1024, 320))
 
-    # -----------------------------
-    # 3) JSCC encoder self-test
-    # Input compressed:     [B, T', V', L, C]
-    # Expected latent:      [B, 4, 1024, 256]
-    # -----------------------------
     jscc_enc = MVSC_JSCC_Encoder(
-        dim=token_dim,
+        dim=320,
         latent_dim=latent_dim,
     ).to(device)
 
     with torch.no_grad():
-        y_jscc = jscc_enc(y_common)
+        y_jscc, hw_jscc = jscc_enc(y_common, hw=hw_common, return_hw=True)
 
     print("\n[JSCC Encoder]")
     print("input :", y_common.shape)
-    print("output:", y_jscc.shape)
-    # expected: [2, 4, 1024, 256]   # no-compression JSCC setting: 32x32 -> 32x32 -> 32x32 -> 32x32
+    print("output:", y_jscc.shape, "hw:", hw_jscc)
+    check_shape("JSCC Encoder", y_jscc, (B, 4, 64, latent_dim))
 
-    # -----------------------------
-    # 4) Full encoder self-test
-    # RGB GOP -> individual -> commonality -> jscc
-    # Expected final latent: [B, 4, 1024, 256]
-    # -----------------------------
     with torch.no_grad():
-        y_full = jscc_enc(common_enc(ind_enc(x_rgb)))
+        y_ind2, hw_ind2 = ind_enc(x_rgb, return_hw=True)
+        y_common2, hw_common2 = common_enc(y_ind2, hw=hw_ind2, return_hw=True)
+        y_full, hw_full = jscc_enc(y_common2, hw=hw_common2, return_hw=True)
 
     print("\n[Full MVSC Encoder]")
     print("input :", x_rgb.shape)
-    print("output:", y_full.shape)
-    # expected: [2, 4, 1024, 256]   # no-compression JSCC setting: 32x32 -> 32x32 -> 32x32 -> 32x32
+    print("output:", y_full.shape, "hw:", hw_full)
+    check_shape("Full MVSC Encoder", y_full, (B, 4, 64, latent_dim))
+
+    print("\nAll encoder self-tests passed.")

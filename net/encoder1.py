@@ -352,7 +352,12 @@ class SwinJSCC_Encoder(nn.Module):
 
 
 class SwinTransformerBlock3D(nn.Module):
-    """3D Swin block with shifted window attention over a depth axis D and spatial axes [H, W]."""
+    """3D Swin block with shifted window attention over a depth axis D and spatial axes [H, W].
+
+    The 3D shifted-window setting follows the paper-style configuration: if
+    `window_size=4`, the effective 3D window is `(4, 4, 4)`, and the shifted
+    block uses `(2, 2, 2)`.
+    """
 
     def __init__(
         self,
@@ -372,15 +377,15 @@ class SwinTransformerBlock3D(nn.Module):
         self.num_heads = num_heads
 
         if isinstance(window_size, int):
-            window_size = (2, window_size, window_size)
+            window_size = (window_size, window_size, window_size)
         elif len(window_size) == 2:
-            window_size = (2, window_size[0], window_size[1])
+            window_size = (window_size[0], window_size[0], window_size[1])
         self.window_size = tuple(window_size)
 
         if isinstance(shift_size, int):
             shift_size = (shift_size, shift_size, shift_size)
         elif len(shift_size) == 2:
-            shift_size = (0, shift_size[0], shift_size[1])
+            shift_size = (shift_size[0], shift_size[0], shift_size[1])
         self.shift_size = tuple(shift_size)
 
         self.norm1 = norm_layer(dim)
@@ -494,14 +499,17 @@ class BasicLayer3D(nn.Module):
     Stack of 3D Swin blocks.
     Input: [B, D, L, C], where D is the flattened depth axis formed from
     temporal and view dimensions when needed.
+    The 3D shifted-window setting follows the paper-style configuration: if
+    `window_size=4`, the effective 3D window is `(4, 4, 4)`, and the shifted
+    block uses `(2, 2, 2)`.
     """
 
     def __init__(self, dim, input_resolution, depth, num_heads, window_size=8):
         super().__init__()
         if isinstance(window_size, int):
-            window_size_3d = (2, window_size, window_size)
+            window_size_3d = (window_size, window_size, window_size)
         elif len(window_size) == 2:
-            window_size_3d = (2, window_size[0], window_size[1])
+            window_size_3d = (window_size[0], window_size[0], window_size[1])
         else:
             window_size_3d = tuple(window_size)
 
@@ -635,26 +643,32 @@ class MVSC_Individual_Encoder(nn.Module):
     Input:  [B, T, V, 3, H, W]
     Output: [B, T, V, L, C]
 
-    Hierarchical channel design:
-      stage 1: C1 = embed_dim
-      stage 2: C2 = 2 * embed_dim
-      stage 3: C3 = 4 * embed_dim
+    Author-confirmed 3-stage design:
+      stage 1: C1 = 96,  N1 = 1
+      stage 2: C2 = 144, N2 = 2
+      stage 3: C3 = 192, N3 = 1
+
+    So the default per-stage depth is `depths=(1, 2, 1)` rather than a
+    symmetric Swin-style setting.
     """
 
-    def __init__(self, img_size=256, patch_size=2, in_chans=3, embed_dim=96):
+    def __init__(self, img_size=256, patch_size=2, in_chans=3, embed_dim=96, depths=(1, 2, 1)):
         super().__init__()
 
         if isinstance(img_size, int):
             img_size = (img_size, img_size)
+        if isinstance(depths, int):
+            depths = (depths, depths, depths)
+        if len(depths) != 3:
+            raise ValueError(f"MVSC_Individual_Encoder expects 3 stage depths, got depths={depths}")
         self.img_size = img_size
         self.patch_size = patch_size
         self.embed_dim = embed_dim
 
-        # Use a SwinJSCC-style smoother channel schedule for the 3-stage
-        # individual encoder while keeping the MVSC 3-stage / H/8 design.
-        c1 = 128
-        c2 = 192
-        c3 = 256
+        # Author-confirmed individual encoder channel schedule.
+        c1 = 96
+        c2 = 144
+        c3 = 192
 
         stage1_resolution = (img_size[0] // patch_size, img_size[1] // patch_size)
         stage2_resolution = (stage1_resolution[0] // 2, stage1_resolution[1] // 2)
@@ -679,8 +693,8 @@ class MVSC_Individual_Encoder(nn.Module):
                     dim=c1,
                     out_dim=c1,
                     input_resolution=stage1_resolution,
-                    depth=2,
-                    num_heads=4,
+                    depth=depths[0],
+                    num_heads=3,
                     window_size=8,
                     downsample=None,
                 ),
@@ -688,7 +702,7 @@ class MVSC_Individual_Encoder(nn.Module):
                     dim=c2,
                     out_dim=c2,
                     input_resolution=stage2_resolution,
-                    depth=2,
+                    depth=depths[1],
                     num_heads=6,
                     window_size=8,
                     downsample=None,
@@ -697,7 +711,7 @@ class MVSC_Individual_Encoder(nn.Module):
                     dim=c3,
                     out_dim=c3,
                     input_resolution=stage3_resolution,
-                    depth=2,
+                    depth=depths[2],
                     num_heads=8,
                     window_size=8,
                     downsample=None,
@@ -833,44 +847,47 @@ class MVSC_Commonality_Encoder(nn.Module):
     Input:  [B, T, V, L, C]
     Output: [B, T', V', L, C]
 
-    Paper-aligned stage layout under the current implementation:
-      stage 1: Temporal Patch Embedding + 3D Swin over [D, H, W]
-      stage 2: Temporal Patch Merging   + 3D Swin over [D, H, W]
-      stage 3: View Patch Merging       + 3D Swin over [D, H, W]
+    Author-confirmed commonality encoder design:
+      stage 1: 3D Swin Block ×2 with C = 256
+      stage 2: 3D Swin Block ×1 with C = 320
 
-    Here D is a flattened depth axis defined by D = T * V. This lets the 3D Swin
-    blocks jointly model temporal and inter-view correlations using a standard 3D
-    window attention implementation.
+    Here D is a flattened depth axis defined by D = T * V. Stage 1 first lifts
+    the individual feature channels from 192 to 256, then stage 2 merges along
+    the temporal axis and increases channels from 256 to 320.
     """
 
-    def __init__(self, dim, input_resolution, depth=2, num_heads=8):
+    def __init__(self, dim, input_resolution, depths=(2, 1), num_heads=(8, 10)):
         super().__init__()
 
-        self.stage1_patch = TemporalPatchEmbedding(dim=dim, out_dim=dim)
+        if isinstance(depths, int):
+            depths = (depths, depths)
+        if len(depths) != 2:
+            raise ValueError(f"MVSC_Commonality_Encoder expects 2 stage depths, got depths={depths}")
+
+        if isinstance(num_heads, int):
+            num_heads = (num_heads, num_heads)
+        if len(num_heads) != 2:
+            raise ValueError(f"MVSC_Commonality_Encoder expects 2 stage head counts, got num_heads={num_heads}")
+
+        self.stage1_dim = 256
+        self.stage2_dim = 320
+
+        self.stage1_patch = TemporalPatchEmbedding(dim=dim, out_dim=self.stage1_dim)
         self.stage1_swin = BasicLayer3D(
-            dim=dim,
+            dim=self.stage1_dim,
             input_resolution=input_resolution,
-            depth=depth,
-            num_heads=num_heads,
-            window_size=8,
+            depth=depths[0],
+            num_heads=num_heads[0],
+            window_size=4,
         )
 
-        self.stage2_patch = TemporalPatchMerging(dim=dim, out_dim=dim)
+        self.stage2_patch = TemporalPatchMerging(dim=self.stage1_dim, out_dim=self.stage2_dim)
         self.stage2_swin = BasicLayer3D(
-            dim=dim,
+            dim=self.stage2_dim,
             input_resolution=input_resolution,
-            depth=depth,
-            num_heads=num_heads,
-            window_size=8,
-        )
-
-        self.stage3_patch = ViewPatchMerging(dim=dim, out_dim=dim)
-        self.stage3_swin = BasicLayer3D(
-            dim=dim,
-            input_resolution=input_resolution,
-            depth=depth,
-            num_heads=num_heads,
-            window_size=8,
+            depth=depths[1],
+            num_heads=num_heads[1],
+            window_size=4,
         )
 
     def forward(self, x):
@@ -878,25 +895,18 @@ class MVSC_Commonality_Encoder(nn.Module):
         if x.dim() != 5:
             raise ValueError(f"MVSC_Commonality_Encoder expects [B,T,V,L,C], got shape={tuple(x.shape)}")
 
-        # stage 1: Temporal Patch Embedding + 3D Swin over flattened depth D = T * V
+        # stage 1: lift channels 192 -> 256, then 3D Swin ×2
         x = self.stage1_patch(x)
         B, T, V, L, C = x.shape
         x = flatten_tv_to_d(x)
         x = self.stage1_swin(x)
         x = restore_d_to_tv(x, T, V)
 
-        # stage 2: Temporal Patch Merging + 3D Swin  (T -> T/2, then D = T * V)
+        # stage 2: temporal merging + channel lift 256 -> 320, then 3D Swin ×1
         x = self.stage2_patch(x)
         B, T, V, L, C = x.shape
         x = flatten_tv_to_d(x)
         x = self.stage2_swin(x)
-        x = restore_d_to_tv(x, T, V)
-
-        # stage 3: View Patch Merging + 3D Swin  (V -> V/2, then D = T * V)
-        x = self.stage3_patch(x)
-        B, T, V, L, C = x.shape
-        x = flatten_tv_to_d(x)
-        x = self.stage3_swin(x)
         x = restore_d_to_tv(x, T, V)
 
         return x
@@ -951,9 +961,10 @@ class MVSC_JSCC_Encoder(nn.Module):
     Output:
       [B, D_jscc, L_jscc, C_latent]
 
-    In the current configuration, the JSCC encoder is set to a fully
-    non-compressive mode: it preserves the input depth axis and spatial token
-    resolution, and only maps the feature channels to the latent space.
+    Mild compression setting:
+      - keep the depth axis D unchanged
+      - compress only the spatial token grid once: 32x32 -> 16x16
+      - then map channels to the latent space
 
     For 5D input, the temporal and view axes are flattened into a single depth
     axis D = T * V before applying 3D convolutions over [D, H, W].
@@ -961,12 +972,12 @@ class MVSC_JSCC_Encoder(nn.Module):
 
     def __init__(self, dim, latent_dim=256):
         super().__init__()
-        # Fully non-compressive JSCC encoder:
-        # keep depth D and spatial resolution H/W unchanged in all three blocks,
-        # and only perform feature transformation.
+        # Mild-compression JSCC encoder:
+        # keep depth D unchanged, compress spatial size once (H/W: 32 -> 16),
+        # then refine features and project to latent_dim.
         self.blocks = nn.ModuleList(
             [
-                JSCCDownBlock3D(dim, dim, stride=(1, 1, 1), num_res_blocks=3),
+                JSCCDownBlock3D(dim, dim, stride=(1, 2, 2), num_res_blocks=3),
                 JSCCDownBlock3D(dim, dim, stride=(1, 1, 1), num_res_blocks=3),
                 JSCCDownBlock3D(dim, latent_dim, stride=(1, 1, 1), num_res_blocks=3),
             ]
@@ -1015,14 +1026,23 @@ if __name__ == "__main__":
     # -----------------------------
     # 1) Individual encoder self-test
     # Input RGB GOP:        [B, T, V, 3, 256, 256]
-    # Expected token output:[B, T, V, 1024, 384]
+    # Expected token output:[B, T, V, 1024, 256]
     # -----------------------------
     B = 2
     T = 4
     V = 4
     embed_dim = 96
-    token_dim = 256   # fixed 3-stage channel schedule: 128 -> 192 -> 256
+    token_dim = 192   # author-confirmed individual encoder output channels
     latent_dim = 256
+
+    def check_shape(name, x, expected_shape):
+        actual_shape = tuple(x.shape)
+        expected_shape = tuple(expected_shape)
+        ok = actual_shape == expected_shape
+        status = "OK" if ok else "FAIL"
+        print(f"[{status}] {name}: actual={actual_shape}, expected={expected_shape}")
+        if not ok:
+            raise AssertionError(f"{name} shape mismatch: actual={actual_shape}, expected={expected_shape}")
 
     x_rgb = torch.randn(B, T, V, 3, 256, 256).to(device)
     ind_enc = MVSC_Individual_Encoder(
@@ -1030,6 +1050,7 @@ if __name__ == "__main__":
         patch_size=2,
         in_chans=3,
         embed_dim=embed_dim,
+        depths=(1, 2, 1),
     ).to(device)
 
     with torch.no_grad():
@@ -1038,6 +1059,7 @@ if __name__ == "__main__":
     print("[Individual Encoder]")
     print("input :", x_rgb.shape)
     print("output:", y_ind.shape)
+    check_shape("Individual Encoder", y_ind, (B, T, V, 1024, token_dim))
     # expected: [2, 4, 4, 1024, 256]
 
     # -----------------------------
@@ -1048,8 +1070,8 @@ if __name__ == "__main__":
     common_enc = MVSC_Commonality_Encoder(
         dim=token_dim,
         input_resolution=(32, 32),
-        depth=2,
-        num_heads=8,
+        depths=(2, 1),
+        num_heads=(8, 10),
     ).to(device)
 
     with torch.no_grad():
@@ -1058,15 +1080,17 @@ if __name__ == "__main__":
     print("\n[Commonality Encoder]")
     print("input :", y_ind.shape)
     print("output:", y_common.shape)
+    check_shape("Commonality Encoder", y_common, (B, 2, 4, 1024, 320))
     # expected: [2, 2, 2, 1024, 256]
 
     # -----------------------------
     # 3) JSCC encoder self-test
     # Input compressed:     [B, T', V', L, C]
-    # Expected latent:      [B, 4, 1024, 256]
+    # Expected latent:      [B, 8, 256, 256]
+    # Spatial grid is mildly compressed once: 32x32 -> 16x16.
     # -----------------------------
     jscc_enc = MVSC_JSCC_Encoder(
-        dim=token_dim,
+        dim=320,
         latent_dim=latent_dim,
     ).to(device)
 
@@ -1076,17 +1100,22 @@ if __name__ == "__main__":
     print("\n[JSCC Encoder]")
     print("input :", y_common.shape)
     print("output:", y_jscc.shape)
-    # expected: [2, 4, 1024, 256]   # no-compression JSCC setting: 32x32 -> 32x32 -> 32x32 -> 32x32
+    check_shape("JSCC Encoder", y_jscc, (B, 8, 256, latent_dim))
+    # expected: [2, 8, 256, 256]   # mild-compression JSCC setting: 32x32 -> 16x16 -> 16x16 -> 16x16
 
     # -----------------------------
     # 4) Full encoder self-test
     # RGB GOP -> individual -> commonality -> jscc
-    # Expected final latent: [B, 4, 1024, 256]
+    # Expected final latent: [B, 8, 256, 256]
     # -----------------------------
     with torch.no_grad():
         y_full = jscc_enc(common_enc(ind_enc(x_rgb)))
 
+
     print("\n[Full MVSC Encoder]")
     print("input :", x_rgb.shape)
     print("output:", y_full.shape)
-    # expected: [2, 4, 1024, 256]   # no-compression JSCC setting: 32x32 -> 32x32 -> 32x32 -> 32x32
+    check_shape("Full MVSC Encoder", y_full, (B, 8, 256, latent_dim))
+    # expected: [2, 8, 256, 256]   # mild-compression JSCC setting: 32x32 -> 16x16 -> 16x16 -> 16x16
+
+    print("\nAll encoder self-tests passed.")
